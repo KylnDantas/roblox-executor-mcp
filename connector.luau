@@ -155,7 +155,7 @@ local BaseBridge = {}; do
             end)
 
             local start = os.clock()
-            repeat task.wait() until response ~= nil or os.clock() - start > 5
+            repeat task.wait(0.05) until response ~= nil or os.clock() - start > 2
 
             if response == nil then
                 task.cancel(thread)
@@ -185,13 +185,41 @@ local WebSocketBridge = setmetatable({}, {__index = BaseBridge}); do
     function WebSocketBridge.new()
         local self = setmetatable({}, WebSocketBridge)
     
-        --// Yield until the server is alive \\--
+        --// Yield until the server is alive with exponential backoff \\--
+        local retryDelay = 0.5
+        local maxRetryDelay = 5
+        local maxAttempts = 10
+        local attempts = 0
+        
         while not self:IsAlive() do
-            task.wait(0.1)
+            attempts += 1
+            if attempts >= maxAttempts then
+                error("Failed to connect to bridge server after " .. maxAttempts .. " attempts")
+            end
+            task.wait(retryDelay)
+            retryDelay = math.min(retryDelay * 1.5, maxRetryDelay)
         end
     
-        --// Connect to the server \\--
-        self.WebSocket = WebSocket.connect("ws://" .. BridgeURL)
+        --// Connect to the server with timeout \\--
+        local wsConnection = nil
+        local connectionThread = task.spawn(function()
+            local success, result = pcall(function()
+                return WebSocket.connect("ws://" .. BridgeURL)
+            end)
+            if success then
+                wsConnection = result
+            end
+        end)
+        
+        local connectionStart = os.clock()
+        repeat task.wait(0.05) until wsConnection ~= nil or os.clock() - connectionStart > 3
+        
+        if wsConnection == nil then
+            task.cancel(connectionThread)
+            error("WebSocket connection timed out after 3 seconds")
+        end
+        
+        self.WebSocket = wsConnection
         self.Connected = true
         self.Callbacks = {}
         self.ClientId = nil
@@ -252,9 +280,19 @@ local HTTPBridge = setmetatable({}, {__index = BaseBridge}); do
     function HTTPBridge.new()
         local self = setmetatable({}, HTTPBridge)
     
-        --// Yield until the server is alive \\--
+        --// Yield until the server is alive with exponential backoff \\--
+        local retryDelay = 0.5
+        local maxRetryDelay = 5
+        local maxAttempts = 10
+        local attempts = 0
+        
         while not self:IsAlive() do
-            task.wait(0.1)
+            attempts += 1
+            if attempts >= maxAttempts then
+                error("Failed to connect to bridge server after " .. maxAttempts .. " attempts")
+            end
+            task.wait(retryDelay)
+            retryDelay = math.min(retryDelay * 1.5, maxRetryDelay)
         end
     
         self.Connected = true
@@ -353,6 +391,8 @@ local function CreateBridge()
         
         if success then
             return bridge
+        else
+            warn("WebSocket bridge failed to initialize, falling back to HTTP polling: " .. tostring(bridge))
         end
     end
 
@@ -579,11 +619,17 @@ end
 
 --// Main Loop \\--
 while true do
-    local Bridge = CreateBridge()
+    local success, Bridge = pcall(CreateBridge)
+    
+    if not success then
+        warn("Failed to create bridge: " .. tostring(Bridge))
+        task.wait(3)
+        continue
+    end
 
     Bridge:BindToType("execute", function(data)
-        loadstring(data.source)()
         setthreadidentity(8)
+        loadstring(data.source)()
     end)
 
     Bridge:BindToType("get-console-output", function(data)
@@ -609,8 +655,8 @@ while true do
     end)
 
     Bridge:BindToType("get-data-by-code", function(data)
-        local dataOutput = table.pack(loadstring(data.source)())
         setthreadidentity(8)
+        local dataOutput = table.pack(loadstring(data.source)())
 
         return dataOutput
     end)
@@ -623,8 +669,8 @@ while true do
             return cached
         end
 
-        local scriptInstance = loadstring(data.source)()
         setthreadidentity(8)
+        local scriptInstance = loadstring(data.source)()
 
         assert(typeof(scriptInstance) == "Instance", "Script instance is not an instance.")
         assert(scriptInstance:IsA("LuaSourceContainer"), "Script instance is not a LuaSourceContainer (Script, LocalScript, or ModuleScript).")
@@ -1319,5 +1365,7 @@ while true do
     end)
 
     Bridge:WaitForDisconnect()
+    
+    task.wait(1)
 end
 
