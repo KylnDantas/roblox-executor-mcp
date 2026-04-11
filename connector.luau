@@ -65,35 +65,50 @@ function base64_encode(data)
 end
 
 --// Functions \\--
+local function CreateDecompileFunction(options)
+    local Endpoint = options.Endpoint
+    local EncodingCallback = options.EncodeBytecode or function(x) return x end
+    local FailedRequestCallback = options.FailedRequestCallback or function(httpResult) return `-- Failed to decompile, error:\n\n--[[\n{httpResult}\n--]]` end
+
+    return function(scriptPath: Script | ModuleScript | LocalScript): string
+        local okBytecode: boolean, bytecode: string = pcall(getscriptbytecode, scriptPath)
+
+        if not okBytecode then
+            return `-- Failed to get script bytecode, error:\n\n--[[\n{bytecode}\n--]]`
+        end
+
+        local okRequest: boolean, httpResult = pcall(request, {
+            Url = Endpoint,
+            Method = "POST",
+            Body = EncodingCallback(bytecode),
+            Headers = {
+                ["Content-Type"] = "text/plain"
+            },
+        })
+
+        if not okRequest then
+            return FailedRequestCallback(httpResult, scriptPath)
+        end
+
+        if httpResult.StatusCode ~= 200 then
+            return FailedRequestCallback(httpResult, scriptPath)
+        end
+
+        return string.gsub(httpResult.Body, string.char(0x00CD), " ")
+    end
+end
 
 local LuaEncode = loadstring(game:HttpGet("https://raw.githubusercontent.com/chadhyatt/LuaEncode/refs/heads/master/src/LuaEncode.lua"))()
 local cloneref = cloneref or function(x) return x end
-local decompile = decompile or function(scriptPath: Script | ModuleScript | LocalScript): string
-    local okBytecode: boolean, bytecode: string = pcall(getscriptbytecode, scriptPath)
 
-    if not okBytecode then
-        return `-- Failed to get script bytecode, error:\n\n--[[\n{bytecode}\n--]]`
+local KonstantDecompile = CreateDecompileFunction({ Endpoint = "http://api.plusgiant5.com/konstant/decompile" })
+local decompile = decompile or CreateDecompileFunction({
+    Endpoint = "https://medal.upio.dev/decompile",
+    EncodingCallback = base64_encode,
+    FailedRequestCallback = function(_, path)
+        return KonstantDecompile(path)
     end
-
-    local okRequest: boolean, httpResult = pcall(request, {
-        Url = "https://medal.upio.dev/decompile",
-        Method = "POST",
-        Body = base64_encode(bytecode),
-        Headers = {
-            ["Content-Type"] = "text/plain"
-        },
-    })
-
-    if not okRequest then
-        return `-- Failed to decompile, error:\n\n--[[\n{httpResult}\n--]]`
-    end
-
-    if httpResult.StatusCode ~= 200 then
-        return `-- Error occurred while requesting the API, error:\n\n--[[\n{httpResult.Body}\n--]]`
-    end
-
-    return string.gsub(httpResult.Body, string.char(0x00CD), " ")
-end
+})
 local getnilinstances = getnilinstances or function() return {} end
 local getscriptbytecode = getscriptbytecode or function(x) error("Unable to get script bytecode.") end
 
