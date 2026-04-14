@@ -425,18 +425,20 @@ local HTTPBridge = setmetatable({}, {__index = BaseBridge}); do
                         local data = HttpService:JSONDecode(response.Body)
                         if data == nil or data.type == nil then return end
                         
-                        local result = self:HandleMessage(data)
-                        if result == nil then return end
-                        
-                        --// Send response back \\--
-                        request({
-                            Url = "http://" .. BridgeURL .. "/respond",
-                            Method = "POST",
-                            Headers = {
-                                ["Content-Type"] = "application/json"
-                            },
-                            Body = HttpService:JSONEncode(result)
-                        })
+                        task.spawn(function()
+                            local result = self:HandleMessage(data)
+                            if result == nil then return end
+                            
+                            --// Send response back \\--
+                            request({
+                                Url = "http://" .. BridgeURL .. "/respond",
+                                Method = "POST",
+                                Headers = {
+                                    ["Content-Type"] = "application/json"
+                                },
+                                Body = HttpService:JSONEncode(result)
+                            })
+                        end)
                     end
                 end)
     
