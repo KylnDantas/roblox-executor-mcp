@@ -1,6 +1,34 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { sendAndWait } from "../../factory.js";
+import { isSecondaryRelay, relayToolToApi } from "../../factory.js";
+import { fetchScriptSearchIndex, type ScriptSearchDocument } from "./script-sources.js";
+
+function formatSourceRange(source: string, startLine?: number, endLine?: number): string {
+  if (startLine === undefined) return source;
+
+  const lines = source.split(/\r?\n/);
+  const totalLines = lines.length;
+  const start = Math.max(1, Math.min(Math.floor(startLine), totalLines));
+  const end =
+    endLine === undefined
+      ? totalLines
+      : Math.max(start, Math.min(Math.floor(endLine), totalLines));
+
+  return `-- Lines ${start}-${end} of ${totalLines}\n` + lines.slice(start - 1, end).join("\n");
+}
+
+function findStoredScript(
+  scripts: ScriptSearchDocument[],
+  scriptPath?: string,
+  debugId?: string
+): ScriptSearchDocument | undefined {
+  if (debugId !== undefined) {
+    return scripts.find((script) => script.debugId === debugId);
+  }
+
+  return scripts.find((script) => script.path === scriptPath);
+}
 
 export default function register(server: McpServer): void {
   server.registerTool(
@@ -36,6 +64,16 @@ export default function register(server: McpServer): void {
       }),
     },
     async ({ scriptGetterSource, scriptPath, startLine, endLine }) => {
+      // Secondary mode: relay to primary which has the script source index.
+      if (isSecondaryRelay()) {
+        return relayToolToApi("get-script-content", {
+          ...(scriptGetterSource !== undefined ? { scriptGetterSource } : {}),
+          ...(scriptPath !== undefined ? { scriptPath } : {}),
+          ...(startLine !== undefined ? { startLine } : {}),
+          ...(endLine !== undefined ? { endLine } : {}),
+        });
+      }
+
       if (scriptGetterSource === undefined && scriptPath === undefined) {
         return {
           content: [
@@ -53,9 +91,31 @@ export default function register(server: McpServer): void {
         };
       }
 
-      const scriptProxyMatch = (scriptPath ?? scriptGetterSource ?? "").match(
-        /^<ScriptProxy: (.+)>$/
-      );
+      const scriptProxyMatch = (scriptPath ?? scriptGetterSource ?? "").match(/^<ScriptProxy: (.+)>$/);
+
+      if (scriptPath !== undefined) {
+        const indexResult = fetchScriptSearchIndex({ allowIncomplete: true });
+        if (indexResult.ok) {
+          const storedScript = findStoredScript(
+            indexResult.index.scripts,
+            scriptPath,
+            scriptProxyMatch?.[1]
+          );
+
+          if (storedScript) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: formatSourceRange(storedScript.source, startLine, endLine),
+                },
+              ],
+            };
+          }
+        } else if (scriptProxyMatch) {
+          return indexResult.response;
+        }
+      }
 
       const data = scriptProxyMatch
         ? { debugId: scriptProxyMatch[1], startLine, endLine }

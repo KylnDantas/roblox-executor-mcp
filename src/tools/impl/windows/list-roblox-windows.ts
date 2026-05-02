@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { BASE_URL } from "../../../config.js";
+import { BASE_URL, WS_PORT } from "../../../config.js";
 import { getInstanceRole } from "../../../bridge/handlers/shared/communication.js";
 import {
   enumRobloxWindows,
@@ -19,9 +19,10 @@ export default function register(server: McpServer): void {
       inputSchema: z.object({}),
     },
     async () => {
-      if (getInstanceRole() === "secondary" && BASE_URL) {
+      if (getInstanceRole() === "secondary") {
         try {
-          const targetUrl = BASE_URL.replace(/\/$/, "") + "/api/windows";
+          const primaryBase = BASE_URL ? BASE_URL.replace(/\/$/, "") : `http://localhost:${WS_PORT}`;
+          const targetUrl = primaryBase + "/api/windows";
           const resp = await fetch(targetUrl);
           const result = (await resp.json()) as { windows?: RobloxWindowInfo[]; error?: string };
 

@@ -1,5 +1,4 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-
 import registerSetActiveClient from "./impl/clients/set-active-client.js";
 import registerListClients from "./impl/clients/list-clients.js";
 
@@ -11,6 +10,7 @@ import registerGetDataByCode from "./impl/inspection/get-data-by-code.js";
 import registerGetConsoleOutput from "./impl/inspection/get-console-output.js";
 import registerSearchInstances from "./impl/inspection/search-instances.js";
 import registerScriptGrep from "./impl/inspection/script-grep.js";
+import registerSemanticSearchScripts from "./impl/inspection/semantic-search-scripts.js";
 import registerGetGameInfo from "./impl/inspection/get-game-info.js";
 import registerGetDescendantsTree from "./impl/inspection/get-descendants-tree.js";
 
@@ -28,6 +28,7 @@ import registerListRobloxWindows from "./impl/windows/list-roblox-windows.js";
 
 export function registerAllTools(server: McpServer): void {
   registerSetActiveClient(server);
+
   registerListClients(server);
 
   registerExecute(server);
@@ -38,6 +39,7 @@ export function registerAllTools(server: McpServer): void {
   registerGetConsoleOutput(server);
   registerSearchInstances(server);
   registerScriptGrep(server);
+  registerSemanticSearchScripts(server);
   registerGetGameInfo(server);
   registerGetDescendantsTree(server);
 

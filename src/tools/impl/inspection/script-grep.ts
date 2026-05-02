@@ -1,6 +1,134 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { sendAndWait } from "../../factory.js";
+import type { ToolTextResponse } from "../../factory.js";
+import { isSecondaryRelay, relayToolToApi } from "../../factory.js";
+import { fetchScriptSearchIndex, type ScriptSearchDocument } from "./script-sources.js";
+
+interface ScriptMatch {
+  script: ScriptSearchDocument;
+  blocks: string[];
+}
+
+interface SearchOptions {
+  query: string;
+  limit: number;
+  contextLines: number;
+  maxMatchesPerScript: number;
+  maxResults?: number;
+  literal: boolean;
+  caseSensitive: boolean;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function compileQuery(query: string, literal: boolean, caseSensitive: boolean): RegExp {
+  return new RegExp(literal ? escapeRegExp(query) : query, caseSensitive ? "" : "i");
+}
+
+function normalizePositiveInteger(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.floor(value));
+}
+
+function getLineBlock(lines: string[], lineIndex: number, contextLines: number): string {
+  const block: string[] = [];
+  const start = Math.max(0, lineIndex - contextLines);
+  const end = Math.min(lines.length - 1, lineIndex + contextLines);
+
+  for (let i = start; i <= end; i += 1) {
+    const marker = i === lineIndex ? ">" : " ";
+    block.push(`${marker} ${i + 1}: ${lines[i] ?? ""}`);
+  }
+
+  return block.join("\n");
+}
+
+function searchScripts(
+  scripts: ScriptSearchDocument[],
+  regex: RegExp,
+  options: SearchOptions
+): { matches: ScriptMatch[]; totalMatches: number; limited: boolean } {
+  const limit = normalizePositiveInteger(options.limit, 50);
+  const contextLines = normalizePositiveInteger(options.contextLines, 2);
+  const maxMatchesPerScript = normalizePositiveInteger(options.maxMatchesPerScript, 20);
+  const maxResults =
+    options.maxResults === undefined
+      ? undefined
+      : normalizePositiveInteger(options.maxResults, Number.MAX_SAFE_INTEGER);
+
+  const matches: ScriptMatch[] = [];
+  let totalMatches = 0;
+  let limited = false;
+
+  for (const script of scripts) {
+    if (matches.length >= limit) {
+      limited = true;
+      break;
+    }
+
+    if (maxResults !== undefined && totalMatches >= maxResults) {
+      limited = true;
+      break;
+    }
+
+    const effectiveCap =
+      maxResults === undefined
+        ? maxMatchesPerScript
+        : Math.min(maxMatchesPerScript, maxResults - totalMatches);
+
+    if (effectiveCap <= 0) {
+      limited = true;
+      break;
+    }
+
+    const lines = script.source.split(/\r?\n/);
+    const blocks: string[] = [];
+
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+      if (blocks.length >= effectiveCap) break;
+
+      const line = lines[lineIndex] ?? "";
+      if (!regex.test(line)) continue;
+
+      blocks.push(getLineBlock(lines, lineIndex, contextLines));
+    }
+
+    if (blocks.length === 0) continue;
+
+    totalMatches += blocks.length;
+    matches.push({ script, blocks });
+  }
+
+  return { matches, totalMatches, limited };
+}
+
+function formatResults(
+  totalMatches: number,
+  matches: ScriptMatch[],
+  limited: boolean,
+  syncNote: string
+): string {
+  const header =
+    `${totalMatches} total ${totalMatches === 1 ? "match" : "matches"} across ` +
+    `${matches.length}${matches.length === 1 ? " script" : " scripts"}` +
+    (limited ? " (results limited)" : "") +
+    syncNote;
+
+  if (matches.length === 0) return header;
+
+  const body = matches.map(({ script, blocks }) => {
+    const scriptPath = script.path || `<ScriptProxy: ${script.debugId}>`;
+    const matchCount = blocks.length;
+    return (
+      `[${scriptPath}] ${matchCount}${matchCount === 1 ? " match" : " matches"}\n\n` +
+      blocks.join("\n\n")
+    );
+  });
+
+  return header + "\n\n" + body.join("\n\n---\n\n");
+}
 
 export default function register(server: McpServer): void {
   server.registerTool(
@@ -8,12 +136,12 @@ export default function register(server: McpServer): void {
     {
       title: "Grep across all scripts in the game",
       description:
-        'Search across all decompiled scripts in the game using standard regex syntax (Perl/PCRE2). Supports patterns like \\bRemoteEvent\\b, \\w+Service, function\\s+\\w+, lookaheads, alternation (foo|bar), etc. Use the literal flag for plain string matching. IMPORTANT: If a script instance has already been garbage collected, a "<ScriptProxy: DebugId>" string will be returned instead of the script instance path.',
+        'Search across all decompiled scripts in the game on the MCP server using JavaScript regex syntax. Supports patterns like \\bRemoteEvent\\b, \\w+Service, function\\s+\\w+, lookaheads, alternation (foo|bar), etc. Use the literal flag for plain string matching. IMPORTANT: If a script instance has already been garbage collected, a "<ScriptProxy: DebugId>" string will be returned instead of the script instance path.',
       inputSchema: z.object({
         query: z
           .string()
           .describe(
-            "The search pattern. Supports standard regex syntax (Perl/PCRE2): \\d, \\w, \\s, \\b, character classes [a-z], alternation (foo|bar), quantifiers (+, *, ?), groups, lookaheads, etc. Use the literal flag for exact string matching."
+            "The search pattern. Supports JavaScript RegExp syntax: \\d, \\w, \\s, \\b, character classes [a-z], alternation (foo|bar), quantifiers (+, *, ?), groups, lookaheads, etc. Use the literal flag for exact string matching."
           ),
         limit: z
           .number()
@@ -39,7 +167,7 @@ export default function register(server: McpServer): void {
         literal: z
           .boolean()
           .describe(
-            "When true, treats the query as a plain literal string — no regex interpretation. Equivalent to grep -F / ripgrep -F. (default: false)"
+            "When true, treats the query as a plain literal string - no regex interpretation. Equivalent to grep -F / ripgrep -F. (default: false)"
           )
           .optional()
           .default(false),
@@ -50,12 +178,42 @@ export default function register(server: McpServer): void {
           .default(true),
       }),
     },
-    async ({ query, limit, contextLines, maxMatchesPerScript, maxResults, literal, caseSensitive }) =>
-      sendAndWait({
-        type: "script-grep",
-        data: { query, limit, contextLines, maxMatchesPerScript, maxResults, literal, caseSensitive },
-        failureMessage: (response) =>
-          "Failed to grep scripts (error occured? Response: " + JSON.stringify(response) + ")",
-      })
+    async (options): Promise<ToolTextResponse> => {
+      // Secondary mode: script sources live on the primary, relay the request.
+      if (isSecondaryRelay()) {
+        return relayToolToApi("script-grep", {
+          query: options.query,
+          limit: options.limit,
+          literal: options.literal,
+          caseSensitive: options.caseSensitive,
+        });
+      }
+
+      let regex: RegExp;
+      try {
+        regex = compileQuery(options.query, options.literal, options.caseSensitive);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: "text", text: `Invalid regex pattern: ${message}` }] };
+      }
+
+      const indexResult = await fetchScriptSearchIndex({ allowIncomplete: true });
+      if (!indexResult.ok) return indexResult.response;
+
+      const { matches, totalMatches, limited } = searchScripts(
+        indexResult.index.scripts,
+        regex,
+        options
+      );
+
+      const index = indexResult.index;
+      const syncNote = index.hasFinishedMapping
+        ? ""
+        : ` (partial index: ${index.mappedSources}/${index.sourcesToMap} scripts uploaded)`;
+
+      return {
+        content: [{ type: "text", text: formatResults(totalMatches, matches, limited, syncNote) }],
+      };
+    }
   );
 }

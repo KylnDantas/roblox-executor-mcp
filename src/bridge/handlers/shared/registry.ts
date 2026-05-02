@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { WebSocket } from "ws";
 import { HTTP_POLL_TIMEOUT } from "../../../config.js";
 import type { RobloxClient } from "../../types.js";
+import { clearScriptSourceIndex } from "./script-source-store.js";
 
 const clientRegistry: Map<string, RobloxClient> = new Map();
 const wsToClientId: Map<WebSocket, string> = new Map();
@@ -59,6 +60,7 @@ export function unregisterClient(clientId: string): void {
     wsToClientId.delete(entry.ws);
   }
   clientRegistry.delete(clientId);
+  clearScriptSourceIndex(clientId);
   console.error(`[Registry] Client unregistered: ${clientId}`);
 }
 

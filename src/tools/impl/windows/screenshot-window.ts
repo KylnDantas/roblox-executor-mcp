@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { BASE_URL } from "../../../config.js";
+import { BASE_URL, WS_PORT } from "../../../config.js";
 import { getInstanceRole } from "../../../bridge/handlers/shared/communication.js";
 import {
   isSupported,
@@ -31,9 +31,10 @@ export default function register(server: McpServer): void {
     },
     async ({ pid }) => {
       // Secondary mode: relay to primary via HTTP — works even if this machine isn't Windows.
-      if (getInstanceRole() === "secondary" && BASE_URL) {
+      if (getInstanceRole() === "secondary") {
         try {
-          const targetUrl = BASE_URL.replace(/\/$/, "") + "/api/screenshot";
+          const primaryBase = BASE_URL ? BASE_URL.replace(/\/$/, "") : `http://localhost:${WS_PORT}`;
+          const targetUrl = primaryBase + "/api/screenshot";
           const resp = await fetch(targetUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
