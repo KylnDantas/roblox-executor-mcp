@@ -16,6 +16,7 @@
     "build": "tsc && node scripts/copy-assets.mjs",
     "install:harnesses": "node scripts/install-harnesses.mjs",
     "start": "node dist/index.js",
+    "update": "node scripts/install-harnesses.mjs --update",
     "prepare": "npm run build"
   },
   "keywords": [],

@@ -56,6 +56,14 @@ It can also help with:
 - optional Ollama `embeddinggemma` setup for semantic indexing
 - pulling latest repo changes before install/build
 
+To update an existing install later, run:
+
+```bash
+npm run update
+```
+
+The update command can stop currently running MCP server processes, optionally pull latest changes, and always rebuilds the server.
+
 ### Manual setup
 
 If you prefer to configure a client yourself, use the setup guide for your client:

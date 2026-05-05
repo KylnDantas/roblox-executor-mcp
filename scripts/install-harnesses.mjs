@@ -57,6 +57,7 @@ const ALL_HARNESSES = [
 
 const NON_INTERACTIVE = process.argv.includes("--yes") || process.argv.includes("-y");
 const DRY_RUN = process.argv.includes("--dry-run");
+const UPDATE_MODE = process.argv.includes("--update");
 
 main().catch((error) => {
   console.error(`\n${colors.red}error:${colors.reset} ${error.message || error}`);
@@ -64,6 +65,11 @@ main().catch((error) => {
 });
 
 async function main() {
+  if (UPDATE_MODE) {
+    await runUpdateMode();
+    return;
+  }
+
   const initial = new Set();
   const selected = NON_INTERACTIVE ? initial : await selectHarnesses(initial);
   if (!NON_INTERACTIVE) {
@@ -139,8 +145,54 @@ async function main() {
   showCursor();
 }
 
-async function installServer(serverRoot, results) {
+async function runUpdateMode() {
+  const serverRoot = path.resolve(CURRENT_REPO_DIR);
+  const results = [];
+
+  section("Update");
   log("info", `Using current repository: ${serverRoot}`);
+
+  const processes = findMcpServerProcesses(serverRoot);
+  if (processes.length) {
+    console.log(`${colors.yellow}Found ${processes.length} running MCP server process(es):${colors.reset}`);
+    for (const proc of processes) {
+      console.log(`${colors.gray}${String(proc.pid).padStart(6)}${colors.reset} ${proc.command}`);
+    }
+    const shouldKill =
+      !NON_INTERACTIVE && (await askYesNo("Kill running MCP server processes before updating", false));
+    if (shouldKill) {
+      killProcesses(processes, results);
+    } else {
+      results.push({
+        status: "warn",
+        message: "Running MCP server processes were left alive. Restart clients after updating so they use the new build.",
+      });
+    }
+  } else {
+    log("skip", "No running MCP server processes found.");
+  }
+
+  const shouldPull =
+    !NON_INTERACTIVE && isGitRepository(serverRoot)
+      ? await askYesNo("Pull latest changes before rebuild", false)
+      : false;
+  if (shouldPull) {
+    await pullLatest(serverRoot, results);
+  }
+
+  await installServer(serverRoot, results, { announceRepo: false });
+
+  section("Summary");
+  for (const item of results) {
+    log(item.status, item.message);
+  }
+  showCursor();
+}
+
+async function installServer(serverRoot, results, options = {}) {
+  if (options.announceRepo !== false) {
+    log("info", `Using current repository: ${serverRoot}`);
+  }
   const runner = commandExists("pnpm") ? "pnpm" : "npm";
   await run(
     runner,
@@ -154,6 +206,79 @@ async function installServer(serverRoot, results) {
 async function pullLatest(serverRoot, results) {
   await run("git", ["pull", "--ff-only"], { cwd: serverRoot, label: "Pulling latest changes" });
   results.push({ status: "ok", message: "Repository updated with latest changes" });
+}
+
+function findMcpServerProcesses(serverRoot) {
+  const serverEntry = path.join(serverRoot, "dist", "index.js");
+  const normalizedEntry = normalizeProcessPath(serverEntry);
+  const normalizedRoot = normalizeProcessPath(serverRoot);
+
+  if (process.platform === "win32") {
+    const script = [
+      "$ErrorActionPreference = 'SilentlyContinue';",
+      "Get-CimInstance Win32_Process |",
+      "Where-Object { $_.CommandLine -and ($_.CommandLine -like '*dist/index.js*' -or $_.CommandLine -like '*dist\\\\index.js*') } |",
+      "ForEach-Object { [PSCustomObject]@{ ProcessId = $_.ProcessId; CommandLine = $_.CommandLine } } |",
+      "ConvertTo-Json -Compress",
+    ].join(" ");
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", script], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    if (result.status !== 0 || !result.stdout.trim()) return [];
+    try {
+      const parsed = JSON.parse(result.stdout);
+      const rows = Array.isArray(parsed) ? parsed : [parsed];
+      return rows
+        .map((row) => ({ pid: Number(row.ProcessId), command: String(row.CommandLine || "") }))
+        .filter((row) => isMatchingMcpProcess(row, normalizedEntry, normalizedRoot));
+    } catch {
+      return [];
+    }
+  }
+
+  const result = spawnSync("ps", ["-axo", "pid=,command="], { encoding: "utf8" });
+  if (result.status !== 0) return [];
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => {
+      const match = line.trim().match(/^(\d+)\s+(.+)$/);
+      return match ? { pid: Number(match[1]), command: match[2] } : null;
+    })
+    .filter(Boolean)
+    .filter((row) => isMatchingMcpProcess(row, normalizedEntry, normalizedRoot));
+}
+
+function isMatchingMcpProcess(proc, normalizedEntry, normalizedRoot) {
+  if (!proc || !Number.isInteger(proc.pid) || proc.pid === process.pid) return false;
+  const command = normalizeProcessPath(proc.command);
+  return (
+    command.includes(normalizedEntry) ||
+    (command.includes("dist/index.js") && command.includes(normalizedRoot))
+  );
+}
+
+function normalizeProcessPath(value) {
+  return String(value || "").replace(/\\/g, "/");
+}
+
+function killProcesses(processes, results) {
+  if (DRY_RUN) {
+    log("dry", `Would kill ${processes.length} MCP server process(es)`);
+    return;
+  }
+
+  for (const proc of processes) {
+    try {
+      process.kill(proc.pid, "SIGTERM");
+      results.push({ status: "ok", message: `Killed MCP server process ${proc.pid}` });
+    } catch (error) {
+      results.push({
+        status: "warn",
+        message: `Could not kill MCP server process ${proc.pid}: ${error.message || error}`,
+      });
+    }
+  }
 }
 
 async function setupOllama(results) {
