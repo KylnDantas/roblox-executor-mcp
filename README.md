@@ -49,6 +49,12 @@ The installer builds the server, lets you choose AI clients, writes supported MC
 npm run install:harnesses
 ```
 
+If your terminal has trouble with the interactive picker, use the plain numbered prompt:
+
+```bash
+npm run install:harnesses -- --plain
+```
+
 It can also help with:
 
 - cross-machine setup on the same LAN

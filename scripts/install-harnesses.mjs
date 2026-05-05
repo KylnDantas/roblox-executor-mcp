@@ -58,6 +58,13 @@ const ALL_HARNESSES = [
 const NON_INTERACTIVE = process.argv.includes("--yes") || process.argv.includes("-y");
 const DRY_RUN = process.argv.includes("--dry-run");
 const UPDATE_MODE = process.argv.includes("--update");
+const ASCII_MODE = process.platform === "win32" || process.argv.includes("--ascii");
+const PLAIN_MODE = process.argv.includes("--plain");
+if (PLAIN_MODE || process.env.NO_COLOR) {
+  for (const key of Object.keys(colors)) {
+    colors[key] = "";
+  }
+}
 
 main().catch((error) => {
   console.error(`\n${colors.red}error:${colors.reset} ${error.message || error}`);
@@ -205,6 +212,7 @@ async function installServer(serverRoot, results, options = {}) {
     throw new Error(`Build completed, but ${serverEntry} was not created.`);
   }
   results.push({ status: "ok", message: `Server ready at ${serverRoot}` });
+  results.push({ status: "ok", message: `Server entry verified at ${serverEntry}` });
 }
 
 async function pullLatest(serverRoot, results) {
@@ -698,6 +706,10 @@ async function run(command, args, options = {}) {
 }
 
 async function selectHarnesses(initial) {
+  if (PLAIN_MODE || !process.stdin.isTTY || !process.stdout.isTTY) {
+    return selectHarnessesPlain(initial);
+  }
+
   const state = {
     cursor: 0,
     search: "",
@@ -714,10 +726,10 @@ async function selectHarnesses(initial) {
     const cleanup = () => {
       if (stdin.isTTY) stdin.setRawMode(false);
       showCursor();
-      process.stdout.write("\x1b[2J\x1b[H");
+      if (!ASCII_MODE) process.stdout.write("\x1b[2J\x1b[H");
+      else process.stdout.write("\n");
       leaveAlternateScreen();
       stdin.off("keypress", onKey);
-      stdin.pause();
     };
     const visibleItems = () => {
       const q = state.search.trim().toLowerCase();
@@ -728,23 +740,31 @@ async function selectHarnesses(initial) {
       if (state.cursor >= items.length) state.cursor = Math.max(0, items.length - 1);
       process.stdout.write("\x1b[2J\x1b[H");
       printBanner();
-      console.log(`${colors.green}◆${colors.reset} Which harnesses do you want to install Roblox Executor MCP into?\n`);
+      console.log(`${colors.green}${ASCII_MODE ? ">" : "◆"}${colors.reset} Which harnesses do you want to install Roblox Executor MCP into?\n`);
       console.log(`${colors.green}Selected:${colors.reset} ${formatSelection(state.selected)}\n`);
       let currentGroup = "";
-      const windowed = items.slice(Math.max(0, state.cursor - 9), state.cursor + 18);
+      const maxVisibleRows = getHarnessWindowHeight();
+      const start = getWindowStart(items, state.cursor, maxVisibleRows);
+      const windowed = items.slice(start, start + maxVisibleRows);
       for (const item of windowed) {
         if (item.group !== currentGroup) {
           currentGroup = item.group;
-          console.log(`  ${colors.gray}──${colors.reset} ${colors.bold}${currentGroup}${colors.reset} ${colors.gray}${"─".repeat(Math.max(8, 32 - currentGroup.length))}${colors.reset}`);
+          const line = ASCII_MODE ? "--" : "──";
+          const fill = ASCII_MODE ? "-" : "─";
+          console.log(`  ${colors.gray}${line}${colors.reset} ${colors.bold}${currentGroup}${colors.reset} ${colors.gray}${fill.repeat(Math.max(8, 32 - currentGroup.length))}${colors.reset}`);
         }
         const active = item === items[state.cursor];
-        const marker = state.selected.has(item.id) ? `${colors.green}●${colors.reset}` : `${colors.gray}○${colors.reset}`;
+        const marker = state.selected.has(item.id)
+          ? `${colors.green}${ASCII_MODE ? "x" : "●"}${colors.reset}`
+          : `${colors.gray}${ASCII_MODE ? "o" : "○"}${colors.reset}`;
         const pointer = active ? `${colors.cyan}›${colors.reset}` : " ";
         const support = item.config?.experimental ? ` ${colors.yellow}experimental${colors.reset}` : "";
         const label = active ? `${colors.inverse}${item.name}${colors.reset}` : item.name;
         console.log(`${pointer} ${marker} ${label}${support}`);
       }
-      if (items.length > windowed.length) console.log(colors.gray + `  ${items.length - windowed.length} more match the search` + colors.reset);
+      if (start > 0) console.log(colors.gray + `  ${start} above` + colors.reset);
+      const hiddenBelow = Math.max(0, items.length - (start + windowed.length));
+      if (hiddenBelow > 0) console.log(colors.gray + `  ${hiddenBelow} more match the search` + colors.reset);
       console.log(`\n${colors.gray}Search:${colors.reset} ${state.search}${state.mode === "search" ? "█" : ""}`);
       console.log(`${colors.gray}↑↓ move, space select, a all, / search, enter confirm, q quit${colors.reset}`);
     };
@@ -785,6 +805,45 @@ async function selectHarnesses(initial) {
   });
 }
 
+async function selectHarnessesPlain(initial) {
+  const selected = new Set(initial);
+  console.log(`${colors.cyan}${colors.bold}Roblox Executor MCP${colors.reset}`);
+  console.log(`${colors.gray}Choose harnesses by number. Press Enter for none.${colors.reset}\n`);
+
+  let index = 1;
+  const numbered = [];
+  let currentGroup = "";
+  for (const harness of ALL_HARNESSES) {
+    if (harness.group !== currentGroup) {
+      currentGroup = harness.group;
+      console.log(`${colors.bold}${currentGroup}${colors.reset}`);
+    }
+    numbered.push(harness);
+    const experimental = harness.config?.experimental ? ` ${colors.yellow}(experimental)${colors.reset}` : "";
+    console.log(`  ${String(index).padStart(2)}. ${harness.name}${experimental}`);
+    index += 1;
+  }
+
+  const answer = await askInput(
+    "Harness numbers, comma-separated, or 'all'",
+    ""
+  );
+  const raw = answer.trim().toLowerCase();
+  if (!raw) return selected;
+  if (raw === "all") {
+    for (const harness of ALL_HARNESSES) selected.add(harness.id);
+    return selected;
+  }
+
+  for (const part of raw.split(/[,\s]+/)) {
+    const n = Number(part);
+    if (!Number.isInteger(n) || n < 1 || n > numbered.length) continue;
+    selected.add(numbered[n - 1].id);
+  }
+
+  return selected;
+}
+
 async function askInput(label, fallback) {
   showCursor();
   const answer = await prompt(`${colors.bold}${label}${colors.reset} ${colors.gray}(${fallback})${colors.reset}: `);
@@ -815,9 +874,15 @@ function printBanner() {
   const subtitle = "provider setup console";
   const hint = "Pick clients, build this repo, write MCP config where known.";
   const width = Math.max(62, visibleLength(title) + visibleLength(subtitle) + 5, visibleLength(hint) + 2);
-  console.log(colors.cyan + `╭${"─".repeat(width)}╮` + colors.reset);
-  console.log(colors.cyan + "│" + colors.reset + padAnsi(` ${colors.bold}${title}${colors.reset}  ${colors.gray}${subtitle}${colors.reset}`, width) + colors.cyan + "│" + colors.reset);
-  console.log(colors.cyan + `╰${"─".repeat(width)}╯` + colors.reset);
+  if (ASCII_MODE) {
+    console.log(colors.cyan + `+${"-".repeat(width)}+` + colors.reset);
+    console.log(colors.cyan + "|" + colors.reset + padAnsi(` ${colors.bold}${title}${colors.reset}  ${colors.gray}${subtitle}${colors.reset}`, width) + colors.cyan + "|" + colors.reset);
+    console.log(colors.cyan + `+${"-".repeat(width)}+` + colors.reset);
+  } else {
+    console.log(colors.cyan + `╭${"─".repeat(width)}╮` + colors.reset);
+    console.log(colors.cyan + "│" + colors.reset + padAnsi(` ${colors.bold}${title}${colors.reset}  ${colors.gray}${subtitle}${colors.reset}`, width) + colors.cyan + "│" + colors.reset);
+    console.log(colors.cyan + `╰${"─".repeat(width)}╯` + colors.reset);
+  }
   console.log(` ${colors.gray}${hint}${colors.reset}\n`);
 }
 
@@ -827,26 +892,48 @@ function formatSelection(selected) {
   return names.join(", ");
 }
 
+function getHarnessWindowHeight() {
+  const rows = Number(process.stdout.rows) || 30;
+  const reservedRows = 16;
+  return Math.max(5, Math.min(18, rows - reservedRows));
+}
+
+function getWindowStart(items, cursor, maxVisibleRows) {
+  if (items.length <= maxVisibleRows) return 0;
+  const half = Math.floor(maxVisibleRows / 2);
+  const maxStart = Math.max(0, items.length - maxVisibleRows);
+  return Math.min(Math.max(0, cursor - half), maxStart);
+}
+
 function section(title) {
   console.log(`\n${colors.cyan}${colors.bold}${title}${colors.reset}`);
 }
 
 function log(status, message) {
-  const icon = {
-    ok: `${colors.green}◆${colors.reset}`,
-    warn: `${colors.yellow}◆${colors.reset}`,
-    info: `${colors.cyan}◇${colors.reset}`,
-    run: `${colors.purple}●${colors.reset}`,
-    skip: `${colors.gray}◇${colors.reset}`,
-    dry: `${colors.yellow}◇${colors.reset}`,
-  }[status] || `${colors.gray}◇${colors.reset}`;
+  const icon = ASCII_MODE || PLAIN_MODE
+    ? {
+        ok: "[OK]",
+        warn: "[!]",
+        info: "[i]",
+        run: ">",
+        skip: "[-]",
+        dry: "[dry]",
+      }[status] || "[-]"
+    : {
+        ok: `${colors.green}◆${colors.reset}`,
+        warn: `${colors.yellow}◆${colors.reset}`,
+        info: `${colors.cyan}◇${colors.reset}`,
+        run: `${colors.purple}●${colors.reset}`,
+        skip: `${colors.gray}◇${colors.reset}`,
+        dry: `${colors.yellow}◇${colors.reset}`,
+      }[status] || `${colors.gray}◇${colors.reset}`;
   console.log(`${icon} ${message}`);
 }
 
 function startSpinner(label) {
-  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const frames = ASCII_MODE ? ["|", "/", "-", "\\"] : ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   let index = 0;
-  let active = process.stdout.isTTY;
+  let active = process.stdout.isTTY && !PLAIN_MODE;
   if (!active) {
     log("run", label);
     return { stop: (ok) => ok && undefined };
@@ -862,7 +949,7 @@ function startSpinner(label) {
       if (!active) return;
       active = false;
       clearInterval(timer);
-      const icon = ok ? `${colors.green}◆${colors.reset}` : `${colors.red}◆${colors.reset}`;
+      const icon = ok ? `${colors.green}${ASCII_MODE ? "[OK]" : "◆"}${colors.reset}` : `${colors.red}${ASCII_MODE ? "[!]" : "◆"}${colors.reset}`;
       process.stdout.write(`\r\x1b[2K${icon} ${label}\n`);
     },
   };
@@ -1007,17 +1094,21 @@ function toggle(set, value) {
 }
 
 function hideCursor() {
+  if (ASCII_MODE) return;
   if (process.stdout.isTTY) process.stdout.write("\x1b[?25l");
 }
 
 function showCursor() {
+  if (ASCII_MODE) return;
   if (process.stdout.isTTY) process.stdout.write("\x1b[?25h");
 }
 
 function enterAlternateScreen() {
+  if (ASCII_MODE) return;
   if (process.stdout.isTTY) process.stdout.write("\x1b[?1049h\x1b[2J\x1b[H");
 }
 
 function leaveAlternateScreen() {
+  if (ASCII_MODE) return;
   if (process.stdout.isTTY) process.stdout.write("\x1b[?1049l");
 }
