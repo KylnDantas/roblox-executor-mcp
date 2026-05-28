@@ -311,6 +311,8 @@ export async function POST(req: IncomingMessage, res: ServerResponse): Promise<v
       data.limit = Math.min(Number(params.limit) || 50, 100);
     } else if (type === "get-console-output") {
       data.limit = Math.min(Number(params.limit) || 50, 200);
+      if (typeof params.logsOrder === "string") data.logsOrder = params.logsOrder;
+      if (typeof params.filter === "string") data.filter = params.filter;
     } else if (type === "get-descendants-tree") {
       const root = params.root as string;
       if (!root) return jsonErr(res, "Missing 'root' parameter.");

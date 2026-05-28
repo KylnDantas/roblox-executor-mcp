@@ -20,12 +20,16 @@ export default function register(server: McpServer): void {
           .describe("The order of the logs to return (default: NewestFirst)")
           .optional()
           .default("NewestFirst"),
+        filter: z
+          .string()
+          .describe("Optional string filter; only logs containing this text are returned")
+          .optional(),
       }),
     },
-    async ({ limit, logsOrder }) =>
+    async ({ limit, logsOrder, filter }) =>
       sendAndWait({
         type: "get-console-output",
-        data: { limit, logsOrder },
+        data: { limit, logsOrder, filter },
         failureMessage: () => "Failed to get console output.",
       })
   );

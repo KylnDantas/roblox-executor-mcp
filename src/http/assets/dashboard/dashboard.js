@@ -425,8 +425,13 @@ const toolDefs = {
         desc: 'Retrieve the client\'s console/output log',
         fields: [
             { key: 'limit', label: 'Max Lines', type: 'text', placeholder: '50', default: '50' },
+            { key: 'filter', label: 'Filter (optional)', type: 'text', placeholder: 'Only include lines containing this text' },
         ],
-        buildPayload(vals) { return { type: 'get-console-output', limit: parseInt(vals.limit) || 50 }; }
+        buildPayload(vals) {
+            const payload = { type: 'get-console-output', limit: parseInt(vals.limit) || 50 };
+            if (vals.filter) payload.filter = vals.filter;
+            return payload;
+        }
     },
     'get-descendants-tree': {
         name: 'Descendants Tree',

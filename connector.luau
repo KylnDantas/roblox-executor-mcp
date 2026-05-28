@@ -997,32 +997,68 @@ while true do
     end
 
     Bridge:BindToType("execute", function(data)
-        setthreadidentity(8)
         task.defer(function()
+            setthreadidentity(8)
             loadstring(data.source)()
         end)
     end)
 
-    Bridge:BindToType("get-console-output", function(data)
+    Bridge:BindToTypeRaw("get-console-output", function(data)
         local limit = data.limit or 50
         local logsOrder = data.logsOrder or "NewestFirst"
+        local filter = data.filter
+        local hasFilter = typeof(filter) == "string" and filter ~= ""
 
         local logs = LogService:GetLogHistory()
         local results = {}
-        
+        local matchedCount = 0
+
+        local function matchesFilter(logEntry)
+            if not hasFilter then return true end
+            return string.find(logEntry.message, filter, 1, true) ~= nil
+        end
+
+        local function escapeLogMessage(message)
+            local output = tostring(message or "")
+            output = string.gsub(output, "&", "&amp;")
+            output = string.gsub(output, "<", "&lt;")
+            output = string.gsub(output, ">", "&gt;")
+            return output
+        end
+
         if logsOrder == "NewestFirst" then
             for i = #logs, 1, -1 do
-                if #results >= limit then break end
-                table.insert(results, logs[i])
+                local logEntry = logs[i]
+                if not matchesFilter(logEntry) then continue end
+                
+                matchedCount += 1
+                if #results < limit then
+                    table.insert(results, logEntry)
+                end
             end
         else
-            for _, log in logs do
-                if #results >= limit then break end
-                table.insert(results, log)
+            for _, logEntry in logs do
+                if not matchesFilter(logEntry) then continue end
+                
+                matchedCount += 1
+                if #results < limit then
+                    table.insert(results, logEntry)
+                end
             end
         end
 
-        return { count = #LogService:GetLogHistory(), limited = #LogService:GetLogHistory() > limit, results = results }
+        local outputLines = {}
+        table.insert(outputLines, string.format("Displaying %d/%d logs:", #results, matchedCount))
+
+        for _, logEntry in results do
+            table.insert(outputLines, string.format(
+                '<log level="%s" time={%s}>%s</log>',
+                logEntry.messageType.Name, tostring(logEntry.timestamp),
+                escapeLogMessage(logEntry.message)
+            ))
+        end
+
+        return table.concat(outputLines, "\n")
     end)
 
     Bridge:BindToType("get-data-by-code", function(data)
