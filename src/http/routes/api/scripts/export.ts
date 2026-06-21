@@ -124,17 +124,51 @@ function safePathSegment(value: unknown, fallback: string): string {
   return safeFilenamePart(value, fallback).replace(/\.+$/g, "") || fallback;
 }
 
-function scriptZipPath(script: StoredScriptSource, rootFolder: string, used: Set<string>): string {
-  const parts = script.path
+function scriptPathParts(path: string): string[] {
+  const parts = path
     .split(".")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? parts : ["script"];
+}
+
+function scriptPathKey(parts: string[]): string {
+  return parts.join("\u0000");
+}
+
+function collectParentScriptPaths(scripts: StoredScriptSource[]): Set<string> {
+  const scriptPaths = new Set(scripts.map((script) => scriptPathKey(scriptPathParts(script.path))));
+  const parents = new Set<string>();
+
+  for (const script of scripts) {
+    const parts = scriptPathParts(script.path);
+    for (let i = 1; i < parts.length; i++) {
+      const parentKey = scriptPathKey(parts.slice(0, i));
+      if (scriptPaths.has(parentKey)) parents.add(parentKey);
+    }
+  }
+
+  return parents;
+}
+
+function scriptZipPath(
+  script: StoredScriptSource,
+  rootFolder: string,
+  used: Set<string>,
+  parentScriptPaths: Set<string>
+): string {
+  const rawParts = scriptPathParts(script.path);
+  const hasChildren = parentScriptPaths.has(scriptPathKey(rawParts));
+  const parts = rawParts
     .map((part, index) => safePathSegment(part, index === 0 ? "game" : "folder"))
     .filter(Boolean);
 
   if (parts.length === 0) parts.push("script");
 
-  const fileBase = parts.pop() || "script";
+  const folderParts = hasChildren ? parts : parts.slice(0, -1);
+  const fileBase = hasChildren ? "init" : parts[parts.length - 1] || "script";
   const fileName = /\.(lua|luau)$/i.test(fileBase) ? fileBase : `${fileBase}.luau`;
-  const folder = parts.length > 0 ? `${parts.join("/")}/` : "";
+  const folder = folderParts.length > 0 ? `${folderParts.join("/")}/` : "";
   const basePath = `${rootFolder}/${folder}${fileName}`;
 
   if (!used.has(basePath)) {
@@ -181,12 +215,14 @@ export function GET(_req: IncomingMessage, res: ServerResponse, url: URL): void 
   const timestamp = timestampForFilename(exportedAt);
   const rootFolder = `scripts-${place}-${clientName}-${timestamp}`;
   const usedPaths = new Set<string>();
-  const scriptEntries = [...index.scripts]
-    .sort((a, b) => a.path.localeCompare(b.path) || a.debugId.localeCompare(b.debugId))
-    .map((script) => ({
-      script,
-      zipPath: scriptZipPath(script, rootFolder, usedPaths),
-    }));
+  const sortedScripts = [...index.scripts].sort(
+    (a, b) => a.path.localeCompare(b.path) || a.debugId.localeCompare(b.debugId)
+  );
+  const parentScriptPaths = collectParentScriptPaths(sortedScripts);
+  const scriptEntries = sortedScripts.map((script) => ({
+    script,
+    zipPath: scriptZipPath(script, rootFolder, usedPaths, parentScriptPaths),
+  }));
 
   const manifest = JSON.stringify(
     {

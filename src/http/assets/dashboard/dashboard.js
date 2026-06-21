@@ -734,10 +734,13 @@ $('serverLogsLiveBtn').addEventListener('click', () => {
 /* ── Scripts view ────────────────────────────────────────── */
 let scriptsData = [];
 let scriptsSearchQuery = '';
+let scriptsSearchRequestId = 0;
+let scriptsSearchTimer = null;
 let scriptsBrowsePath = []; // current folder path segments
 let scriptsViewingFile = null; // currently viewing file debugId
 let scriptsViewingFileHasEmbeddings = false;
 let scriptsScrollPos = 0; // saved scroll position for the file list
+let scriptsDisplayInfo = new Map();
 
 const FOLDER_ICON = '<svg class="scripts-ficon scripts-ficon--folder" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M2 6a2 2 0 012-2h5l2 2h9a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>';
 const FILE_ICON = '<img class="scripts-ficon" src="luau.svg" width="16" height="16">';
@@ -760,10 +763,16 @@ function updateScriptsExportButton() {
 function resetScriptsState() {
     scriptsData = [];
     scriptsSearchQuery = '';
+    scriptsSearchRequestId += 1;
+    if (scriptsSearchTimer) {
+        clearTimeout(scriptsSearchTimer);
+        scriptsSearchTimer = null;
+    }
     scriptsBrowsePath = [];
     scriptsViewingFile = null;
     scriptsViewingFileHasEmbeddings = false;
     scriptsScrollPos = 0;
+    scriptsDisplayInfo = new Map();
 
     const search = $('scriptsSearch');
     if (search) search.value = '';
@@ -855,7 +864,11 @@ async function fetchScripts() {
         // Update and re-render if count changed or if currently viewing the empty state
         if (newScripts.length !== scriptsData.length || (newScripts.length > 0 && $('scriptsFileList').querySelector('.logs-empty'))) {
             scriptsData = newScripts;
-            $('scriptsCount').textContent = scriptsData.length + (scriptsData.length === 1 ? ' script' : ' scripts');
+            if (scriptsSearchQuery) {
+                renderScriptsSearchResults();
+            } else {
+                $('scriptsCount').textContent = scriptsData.length + (scriptsData.length === 1 ? ' script' : ' scripts');
+            }
             if (!scriptsViewingFile && !scriptsSearchQuery) {
                 renderScriptsBrowser();
             }
@@ -866,18 +879,195 @@ async function fetchScripts() {
     }
 }
 
+function scriptPathParts(path) {
+    const parts = String(path || '').split('.').map(p => p.trim()).filter(Boolean);
+    return parts.length > 0 ? parts : ['script'];
+}
+
+function scriptPathKey(parts) {
+    return parts.join('\u0000');
+}
+
+function collectParentScriptPathKeys(scripts) {
+    const scriptPaths = new Set(scripts.map(s => scriptPathKey(scriptPathParts(s.path))));
+    const parents = new Set();
+
+    for (const script of scripts) {
+        const parts = scriptPathParts(script.path);
+        for (let i = 1; i < parts.length; i++) {
+            const parentKey = scriptPathKey(parts.slice(0, i));
+            if (scriptPaths.has(parentKey)) parents.add(parentKey);
+        }
+    }
+
+    return parents;
+}
+
+function ensureLuauFileName(name) {
+    return /\.(lua|luau)$/i.test(name) ? name : name + '.luau';
+}
+
+function uniqueScriptDisplayName(name, debugId, usedNames) {
+    if (!usedNames.has(name)) {
+        usedNames.add(name);
+        return name;
+    }
+
+    const extIdx = name.lastIndexOf('.');
+    const stem = extIdx === -1 ? name : name.slice(0, extIdx);
+    const ext = extIdx === -1 ? '' : name.slice(extIdx);
+    const suffix = String(debugId || 'copy').slice(0, 8).replace(/[^a-z0-9._-]+/gi, '-') || 'copy';
+    let i = 2;
+    let candidate = stem + '-' + suffix + ext;
+
+    while (usedNames.has(candidate)) {
+        candidate = stem + '-' + suffix + '-' + i + ext;
+        i += 1;
+    }
+
+    usedNames.add(candidate);
+    return candidate;
+}
+
+function buildScriptDisplayInfo(scripts) {
+    const sorted = [...scripts].sort((a, b) => a.path.localeCompare(b.path) || a.debugId.localeCompare(b.debugId));
+    const parentKeys = collectParentScriptPathKeys(sorted);
+    const usedNamesByFolder = new Map();
+    const info = new Map();
+
+    for (const script of sorted) {
+        const parts = scriptPathParts(script.path);
+        const hasChildren = parentKeys.has(scriptPathKey(parts));
+        const folderPath = hasChildren ? parts : parts.slice(0, -1);
+        const baseName = hasChildren ? 'init' : (parts[parts.length - 1] || 'script');
+        const folderKey = scriptPathKey(folderPath);
+        let usedNames = usedNamesByFolder.get(folderKey);
+
+        if (!usedNames) {
+            usedNames = new Set();
+            usedNamesByFolder.set(folderKey, usedNames);
+        }
+
+        const name = uniqueScriptDisplayName(ensureLuauFileName(baseName), script.debugId, usedNames);
+        info.set(script.debugId, {
+            folderPath,
+            name,
+            displayPath: [...folderPath, name].join('/')
+        });
+    }
+
+    return info;
+}
+
+function refreshScriptsDisplayInfo() {
+    scriptsDisplayInfo = buildScriptDisplayInfo(scriptsData);
+    return scriptsDisplayInfo;
+}
+
+function getScriptDisplayInfo(script) {
+    if (!scriptsDisplayInfo.has(script.debugId)) refreshScriptsDisplayInfo();
+    return scriptsDisplayInfo.get(script.debugId) || {
+        folderPath: scriptPathParts(script.path).slice(0, -1),
+        name: ensureLuauFileName(scriptPathParts(script.path).pop() || 'script'),
+        displayPath: ensureLuauFileName(scriptPathParts(script.path).join('/') || 'script')
+    };
+}
+
+function textRangesForQuery(text, query) {
+    const value = String(text || '');
+    const needle = String(query || '').toLowerCase();
+    const haystack = value.toLowerCase();
+    const ranges = [];
+    let from = 0;
+
+    while (needle && ranges.length < 20) {
+        const index = haystack.indexOf(needle, from);
+        if (index === -1) break;
+        ranges.push([index, index + needle.length]);
+        from = index + Math.max(needle.length, 1);
+    }
+
+    return ranges;
+}
+
+function highlightRanges(text, ranges) {
+    const value = String(text || '');
+    const sorted = [...(ranges || [])]
+        .filter(r => Array.isArray(r) && r.length === 2 && r[1] > r[0])
+        .sort((a, b) => a[0] - b[0]);
+    let html = '';
+    let cursor = 0;
+
+    for (const [rawStart, rawEnd] of sorted) {
+        const start = Math.max(cursor, Math.min(value.length, rawStart));
+        const end = Math.max(start, Math.min(value.length, rawEnd));
+        if (start > cursor) html += escapeHtml(value.slice(cursor, start));
+        html += '<mark class="scripts-search-mark">' + escapeHtml(value.slice(start, end)) + '</mark>';
+        cursor = end;
+    }
+
+    if (cursor < value.length) html += escapeHtml(value.slice(cursor));
+    return html || escapeHtml(value);
+}
+
+function highlightQuery(text, query) {
+    return highlightRanges(text, textRangesForQuery(text, query));
+}
+
+function scriptMatchesFileQuery(script, query, displayInfo) {
+    const q = String(query || '').toLowerCase();
+    if (!q) return false;
+    const info = displayInfo.get(script.debugId) || getScriptDisplayInfo(script);
+    return script.path.toLowerCase().includes(q) ||
+        script.debugId.toLowerCase().includes(q) ||
+        (info && info.displayPath.toLowerCase().includes(q));
+}
+
+function getLocalFileSearchHits(query, remoteFiles = []) {
+    const displayInfo = refreshScriptsDisplayInfo();
+    const byDebugId = new Map(scriptsData.map(script => [script.debugId, script]));
+    const seen = new Set();
+    const hits = [];
+
+    for (const script of scriptsData) {
+        if (!scriptMatchesFileQuery(script, query, displayInfo)) continue;
+        seen.add(script.debugId);
+        hits.push(script);
+    }
+
+    for (const remote of remoteFiles) {
+        if (!remote || seen.has(remote.debugId)) continue;
+        const local = byDebugId.get(remote.debugId);
+        if (local) {
+            seen.add(local.debugId);
+            hits.push(local);
+        }
+    }
+
+    return hits;
+}
+
+function codeMatchCountLabel(count) {
+    return count + ' ' + (count === 1 ? 'match' : 'matches');
+}
+
 // Build tree from flat script list
 function buildScriptTree(scripts) {
     const root = { children: {}, scripts: [] };
+    const displayInfo = buildScriptDisplayInfo(scripts);
+    scriptsDisplayInfo = displayInfo;
+
     for (const s of scripts) {
-        const parts = s.path.split('.');
+        const info = displayInfo.get(s.debugId);
+        if (!info) continue;
         let node = root;
-        for (let i = 0; i < parts.length - 1; i++) {
-            const seg = parts[i];
+
+        for (const seg of info.folderPath) {
             if (!node.children[seg]) node.children[seg] = { children: {}, scripts: [] };
             node = node.children[seg];
         }
-        node.scripts.push({ ...s, name: parts[parts.length - 1] });
+
+        node.scripts.push({ ...s, name: info.name, displayPath: info.displayPath });
     }
     return root;
 }
@@ -899,6 +1089,7 @@ function countScriptsRecursive(node) {
 
 function showFileMode() {
     $('scriptsFileMode').style.display = '';
+    $('scriptsFileMode').classList.remove('scripts-file-mode--search');
     $('scriptsCodeMode').style.display = 'none';
     scriptsViewingFile = null;
     
@@ -960,6 +1151,7 @@ function renderBreadcrumb(fileName) {
 function renderScriptsBrowser() {
     // Ensure file mode is showing (but don't reset scriptsViewingFile or touch scroll)
     $('scriptsFileMode').style.display = '';
+    $('scriptsFileMode').classList.remove('scripts-file-mode--search');
     $('scriptsCodeMode').style.display = 'none';
     
     const tree = buildScriptTree(scriptsData);
@@ -1019,40 +1211,146 @@ function renderScriptsBrowser() {
     list.scrollTop = currentScroll;
 }
 
-// Search — shows flat filtered results
-function renderScriptsSearchResults() {
-    $('scriptsFileMode').style.display = '';
-    $('scriptsCodeMode').style.display = 'none';
-    const q = scriptsSearchQuery;
-    const filtered = scriptsData.filter(s => s.path.toLowerCase().includes(q) || s.debugId.toLowerCase().includes(q));
-    $('scriptsCount').textContent = filtered.length + ' result' + (filtered.length !== 1 ? 's' : '');
-    $('scriptsBreadcrumb').innerHTML = '<span class="scripts-bc-seg scripts-bc-seg--current">Search results</span>';
+function renderSearchFileHits(files, query) {
+    if (!files.length) return '';
+
+    return '<div class="scripts-search-section">' +
+        '<div class="scripts-search-heading"><span>Files</span><span>' + files.length + '</span></div>' +
+        files.map(script => {
+            const info = getScriptDisplayInfo(script);
+            return '<button class="scripts-search-file" data-debug-id="' + escapeHtml(script.debugId) + '">' +
+                '<span class="scripts-search-file-name">' + FILE_ICON + '<span>' + highlightQuery(info.displayPath, query) + '</span></span>' +
+                '<span class="scripts-search-file-meta">' + script.lines + ' lines · ' + formatBytes(script.bytes) + '</span>' +
+                '</button>';
+        }).join('') +
+        '</div>';
+}
+
+function renderSearchCodeHits(results, query) {
+    if (!results.length) return '';
+
+    return '<div class="scripts-search-section">' +
+        '<div class="scripts-search-heading"><span>Code</span><span>' + results.length + '</span></div>' +
+        results.map(result => {
+            const script = scriptsData.find(s => s.debugId === result.debugId) || result;
+            const info = script.debugId ? getScriptDisplayInfo(script) : null;
+            const displayPath = info ? info.displayPath : ensureLuauFileName(scriptPathParts(result.path).join('/') || 'script');
+            const matchCount = Number(result.matchCount) || (Array.isArray(result.matches) ? result.matches.length : 0);
+            const snippets = (result.matches || []).map(match => (
+                '<button class="scripts-search-hit" data-debug-id="' + escapeHtml(result.debugId) + '" data-line="' + escapeHtml(match.lineNumber) + '">' +
+                    '<span class="scripts-search-line">' + escapeHtml(match.lineNumber) + '</span>' +
+                    '<code>' + highlightRanges(match.line, match.ranges) + '</code>' +
+                '</button>'
+            )).join('');
+
+            return '<div class="scripts-search-code-result">' +
+                '<button class="scripts-search-code-head" data-debug-id="' + escapeHtml(result.debugId) + '">' +
+                    '<span class="scripts-search-file-name">' + FILE_ICON + '<span>' + highlightQuery(displayPath, query) + '</span></span>' +
+                    '<span class="scripts-search-file-meta">' + codeMatchCountLabel(matchCount) + '</span>' +
+                '</button>' +
+                '<div class="scripts-search-snippets">' + snippets + '</div>' +
+                '</div>';
+        }).join('') +
+        '</div>';
+}
+
+async function renderScriptsSearchResults() {
+    const query = scriptsSearchQuery.trim();
+    const requestId = ++scriptsSearchRequestId;
     const list = $('scriptsFileList');
 
-    if (!filtered.length) {
-        list.innerHTML = '<div class="logs-empty">No matching scripts</div>';
+    if (!selectedClientId) return;
+
+    if (!query) {
+        $('scriptsCount').textContent = scriptsData.length + (scriptsData.length === 1 ? ' script' : ' scripts');
+        renderScriptsBrowser();
         return;
     }
 
-    list.innerHTML = filtered.map(s => {
-        return '<div class="scripts-frow scripts-frow--file" data-debug-id="' + escapeHtml(s.debugId) + '" data-path="' + escapeHtml(s.path) + '">' +
-            '<div class="scripts-fname">' + FILE_ICON + '<span class="scripts-fname-text">' + escapeHtml(s.path) + '</span></div>' +
-            '<div class="scripts-fmeta">' + s.lines + '</div>' +
-            '<div class="scripts-fmeta">' + formatBytes(s.bytes) + '</div>' +
-            '<div class="scripts-fmeta scripts-factions"><button class="scripts-menu-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button></div>' +
-            '</div>';
-    }).join('');
+    $('scriptsFileMode').style.display = '';
+    $('scriptsFileMode').classList.add('scripts-file-mode--search');
+    $('scriptsCodeMode').style.display = 'none';
+    $('scriptsCount').textContent = 'Searching';
+    $('scriptsBreadcrumb').style.display = 'flex';
+    $('scriptsBreadcrumb').innerHTML = '<span class="scripts-bc-seg scripts-bc-seg--current">Search results</span>';
+    list.innerHTML = '<div class="scripts-search-loading">Searching...</div>';
+
+    try {
+        const res = await fetch(`/api/scripts/search?clientId=${encodeURIComponent(selectedClientId)}&q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        if (requestId !== scriptsSearchRequestId || query !== scriptsSearchQuery.trim()) return;
+
+        if (!res.ok) {
+            list.innerHTML = '<div class="logs-empty">' + escapeHtml(data.error || 'Search failed') + '</div>';
+            $('scriptsCount').textContent = '0 results';
+            return;
+        }
+
+        const fileHits = getLocalFileSearchHits(query, data.files || []);
+        const codeHits = Array.isArray(data.code) ? data.code : [];
+        const codeMatchCount = Number(data.totalCodeMatches) || codeHits.reduce((sum, result) => sum + (Number(result.matchCount) || 0), 0);
+        const total = fileHits.length + codeMatchCount;
+        const limited = data.limited ? ' · limited' : '';
+        $('scriptsCount').textContent = total === 0
+            ? '0 results'
+            : fileHits.length + ' files · ' + codeMatchCount + ' code' + limited;
+
+        if (total === 0) {
+            list.innerHTML = '<div class="logs-empty">No matching scripts</div>';
+            return;
+        }
+
+        list.innerHTML =
+            renderSearchFileHits(fileHits, query) +
+            renderSearchCodeHits(codeHits, query);
+    } catch(e) {
+        if (requestId !== scriptsSearchRequestId) return;
+        $('scriptsCount').textContent = '0 results';
+        list.innerHTML = '<div class="logs-empty">Search failed</div>';
+    }
 }
 
 $('scriptsSearch').addEventListener('input', (e) => {
-    scriptsSearchQuery = e.target.value.toLowerCase().trim();
+    scriptsSearchQuery = e.target.value.trim();
+    scriptsSearchRequestId += 1;
+    if (scriptsSearchTimer) {
+        clearTimeout(scriptsSearchTimer);
+        scriptsSearchTimer = null;
+    }
+
     if (scriptsSearchQuery) {
-        renderScriptsSearchResults();
+        scriptsSearchTimer = setTimeout(() => {
+            scriptsSearchTimer = null;
+            renderScriptsSearchResults();
+        }, 160);
     } else {
         $('scriptsCount').textContent = scriptsData.length + (scriptsData.length === 1 ? ' script' : ' scripts');
         renderScriptsBrowser();
     }
 });
+
+function clearScriptsSearchState() {
+    scriptsSearchQuery = '';
+    scriptsSearchRequestId += 1;
+    if (scriptsSearchTimer) {
+        clearTimeout(scriptsSearchTimer);
+        scriptsSearchTimer = null;
+    }
+    $('scriptsSearch').value = '';
+    $('scriptsCount').textContent = scriptsData.length + (scriptsData.length === 1 ? ' script' : ' scripts');
+}
+
+function setBrowsePathForScript(debugId) {
+    const script = scriptsData.find(s => s.debugId === debugId);
+    if (!script) return;
+    scriptsBrowsePath = [...getScriptDisplayInfo(script).folderPath];
+}
+
+function openScriptFromSearch(debugId, lineNumber = null) {
+    setBrowsePathForScript(debugId);
+    clearScriptsSearchState();
+    openScriptSource(debugId, lineNumber);
+}
 
 // Navigation clicks
 $('scriptsFileList').addEventListener('click', (e) => {
@@ -1061,6 +1359,13 @@ $('scriptsFileList').addEventListener('click', (e) => {
     if (menuBtn) {
         e.stopPropagation();
         showFileContextMenu(menuBtn);
+        return;
+    }
+
+    const searchTarget = e.target.closest('.scripts-search-file, .scripts-search-code-head, .scripts-search-hit');
+    if (searchTarget && searchTarget.dataset.debugId) {
+        const lineNumber = searchTarget.dataset.line ? Number(searchTarget.dataset.line) : null;
+        openScriptFromSearch(searchTarget.dataset.debugId, lineNumber);
         return;
     }
 
@@ -1079,17 +1384,8 @@ $('scriptsFileList').addEventListener('click', (e) => {
     }
     if (row.dataset.debugId) {
         // Find the script to navigate to its parent folder first
-        const script = scriptsData.find(s => s.debugId === row.dataset.debugId);
-        if (script) {
-            const parts = script.path.split('.');
-            scriptsBrowsePath = parts.slice(0, -1);
-            // Clear search when navigating from search results
-            if (scriptsSearchQuery) {
-                scriptsSearchQuery = '';
-                $('scriptsSearch').value = '';
-                $('scriptsCount').textContent = scriptsData.length + (scriptsData.length === 1 ? ' script' : ' scripts');
-            }
-        }
+        setBrowsePathForScript(row.dataset.debugId);
+        if (scriptsSearchQuery) clearScriptsSearchState();
         openScriptSource(row.dataset.debugId);
     }
 });
@@ -1104,8 +1400,24 @@ $('scriptsBreadcrumb').addEventListener('click', (e) => {
     renderScriptsBrowser();
 });
 
+function scrollScriptCodeToLine(lineNumber) {
+    const line = Number(lineNumber);
+    if (!scriptsCodeView || !Number.isFinite(line) || line < 1) return;
+
+    const gutter = $('scriptsCodeGutter');
+    gutter.querySelectorAll('.scripts-code-gutter--target').forEach(el => {
+        el.classList.remove('scripts-code-gutter--target');
+    });
+
+    const target = gutter.children[line - 1];
+    const lineHeight = target ? target.getBoundingClientRect().height || 20 : 20;
+    scriptsCodeView.scrollTop = Math.max(0, (line - 1) * lineHeight - scriptsCodeView.clientHeight * 0.35);
+
+    if (target) target.classList.add('scripts-code-gutter--target');
+}
+
 // Inline code viewer
-async function openScriptSource(debugId) {
+async function openScriptSource(debugId, lineNumber = null) {
     if (!selectedClientId) return;
     
     // Save current scroll position before switching to code mode
@@ -1119,11 +1431,12 @@ async function openScriptSource(debugId) {
 
         scriptsViewingFile = debugId;
         const lines = data.source.split('\n');
-        const fileName = data.path.split('.').pop();
 
         // Track whether this script has embeddings
         const scriptMeta = scriptsData.find(s => s.debugId === debugId);
         scriptsViewingFileHasEmbeddings = scriptMeta ? !!scriptMeta.hasEmbeddings : false;
+        const displayInfo = scriptMeta ? getScriptDisplayInfo(scriptMeta) : null;
+        const fileName = displayInfo ? displayInfo.name : ensureLuauFileName(scriptPathParts(data.path).pop() || 'script');
 
         // Update breadcrumb to show file
         renderBreadcrumb(fileName);
@@ -1151,7 +1464,10 @@ async function openScriptSource(debugId) {
         showCodeMode();
         updateCodeMenuReindex();
 
-        requestAnimationFrame(updateCodeOverflowHint);
+        requestAnimationFrame(() => {
+            updateCodeOverflowHint();
+            if (lineNumber) scrollScriptCodeToLine(lineNumber);
+        });
     } catch(e) {
         showToast('Failed to load script source', 'error');
     }
