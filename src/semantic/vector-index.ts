@@ -211,9 +211,11 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot / (Math.sqrt(aMagnitude) * Math.sqrt(bMagnitude));
 }
 
+const SNIPPET_MAX_LINES = 10;
+
 function formatSnippet(chunk: ScriptChunk): string {
   const lines = chunk.body.split("\n");
-  const snippetLines = lines.slice(0, 24).map((line, index) => {
+  const snippetLines = lines.slice(0, SNIPPET_MAX_LINES).map((line, index) => {
     return `${chunk.startLine + index}: ${line}`;
   });
 

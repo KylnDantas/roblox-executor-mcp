@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import fs from "fs";
 import { z } from "zod";
-import { sendFireAndForget } from "../../factory.js";
+import { sendFireAndForget, toolTextResponse } from "../../factory.js";
 import { threadContextSchema } from "../../schemas.js";
 
 export default function register(server: McpServer): void {
@@ -10,7 +10,7 @@ export default function register(server: McpServer): void {
     {
       title: "Execute a Luau file in the Roblox Game Client",
       description:
-        "Execute a local .luau or .lua file in the active Roblox client without returning output. Use get-data-by-code instead when you need returned values.",
+        "Execute a local .luau or .lua file in the active Roblox client without returning output. Use get-data-by-code instead when you need returned values. To verify the effect, follow up with a small get-console-output (low limit) or a targeted get-data-by-code probe.",
       inputSchema: z.object({
         filePath: z
           .string()
@@ -20,9 +20,7 @@ export default function register(server: McpServer): void {
     },
     async ({ filePath, threadContext }) => {
       if (!fs.existsSync(filePath)) {
-        return {
-          content: [{ type: "text" as const, text: `File not found: ${filePath}` }],
-        };
+        return toolTextResponse(`File not found: ${filePath}`, {}, true);
       }
 
       const code = fs.readFileSync(filePath, "utf-8");

@@ -14,7 +14,11 @@ export interface ScreenshotResult {
   needsDisambiguation?: boolean;
   windows?: RobloxWindowInfo[];
   imageBase64?: string;
+  mimeType?: string;
 }
+
+export const DEFAULT_SCREENSHOT_MAX_WIDTH = 1280;
+export const DEFAULT_SCREENSHOT_JPEG_QUALITY = 70;
 
 export function isSupported(): boolean {
   return process.platform === "win32";
@@ -88,8 +92,14 @@ if ($found.Count -eq 0) {
   }
 }
 
-function captureWindowPNG(hwnd: string): string {
+function captureWindowPNG(
+  hwnd: string,
+  maxWidth: number = DEFAULT_SCREENSHOT_MAX_WIDTH,
+  jpegQuality: number = DEFAULT_SCREENSHOT_JPEG_QUALITY
+): string {
   const outFile = path.join(os.tmpdir(), `roblox_screenshot_${Date.now()}.b64`);
+  const safeMaxWidth = Math.max(320, Math.min(Math.floor(maxWidth) || DEFAULT_SCREENSHOT_MAX_WIDTH, 3840));
+  const safeQuality = Math.max(30, Math.min(Math.floor(jpegQuality) || DEFAULT_SCREENSHOT_JPEG_QUALITY, 95));
   const ps = `
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -130,9 +140,30 @@ $hdc = $gfx.GetHdc()
 $gfx.ReleaseHdc($hdc)
 $gfx.Dispose()
 
+# Downscale to keep vision-token cost low.
+$maxWidth = ${safeMaxWidth}
+$final = $bmp
+if ($w -gt $maxWidth) {
+    $ratio = $maxWidth / $w
+    $nw = [int]($w * $ratio)
+    $nh = [int]($h * $ratio)
+    $resized = New-Object System.Drawing.Bitmap($nw, $nh)
+    $rg = [System.Drawing.Graphics]::FromImage($resized)
+    $rg.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $rg.DrawImage($bmp, 0, 0, $nw, $nh)
+    $rg.Dispose()
+    $bmp.Dispose()
+    $final = $resized
+}
+
+# Encode as JPEG to shrink payload vs raw PNG.
+$jpgCodec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
+$encParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
+$encParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]${safeQuality})
+
 $ms = New-Object System.IO.MemoryStream
-$bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-$bmp.Dispose()
+$final.Save($ms, $jpgCodec, $encParams)
+$final.Dispose()
 $bytes = $ms.ToArray()
 $ms.Dispose()
 $b64 = [Convert]::ToBase64String($bytes)
@@ -158,7 +189,7 @@ Write-Output 'OK'
   }
 }
 
-export function performScreenshot(pid?: number): ScreenshotResult {
+export function performScreenshot(pid?: number, maxWidth?: number): ScreenshotResult {
   const windows = enumRobloxWindows();
 
   if (windows.length === 0) {
@@ -184,6 +215,6 @@ export function performScreenshot(pid?: number): ScreenshotResult {
   }
 
   const target = targets[0]!;
-  const imageBase64 = captureWindowPNG(target.hwnd);
-  return { imageBase64 };
+  const imageBase64 = captureWindowPNG(target.hwnd, maxWidth);
+  return { imageBase64, mimeType: "image/jpeg" };
 }

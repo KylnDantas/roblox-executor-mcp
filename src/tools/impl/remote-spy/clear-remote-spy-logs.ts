@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { sendAndWait } from "../../factory.js";
+import { describeResponse, sendAndWait } from "../../factory.js";
 
 export default function register(server: McpServer): void {
   server.registerTool(
@@ -16,7 +16,7 @@ export default function register(server: McpServer): void {
         type: "clear-remote-spy-logs",
         data: {},
         failureMessage: (response) =>
-          "Failed to clear remote spy logs. Response: " + JSON.stringify(response),
+          "Failed to clear remote spy logs: " + describeResponse(response),
       })
   );
 }

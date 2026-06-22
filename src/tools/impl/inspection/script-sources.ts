@@ -7,7 +7,7 @@ import {
   type ScriptSourceIndex,
   type StoredScriptSource,
 } from "../../../bridge/handlers/shared/script-source-store.js";
-import type { ToolTextResponse } from "../../factory.js";
+import { toolTextResponse, type ToolTextResponse } from "../../factory.js";
 import { INVALID_CLIENT_ERROR, NO_CLIENT_ERROR } from "../../errors.js";
 
 export type ScriptSearchDocument = StoredScriptSource;
@@ -39,30 +39,23 @@ export function fetchScriptSearchIndex(
   if (!options.allowIncomplete && !index.hasFinishedMapping) {
     return {
       ok: false,
-      response: {
-        content: [
-          {
-            type: "text",
-            text:
-              "The MCP server is still receiving script sources from the Roblox client " +
-              `(${index.processedSources}/${index.sourcesToMap} processed, ${index.mappedSources} uploaded). Please try again later.`,
-          },
-        ],
-      },
+      response: toolTextResponse(
+        "The MCP server is still receiving script sources from the Roblox client " +
+          `(${index.processedSources}/${index.sourcesToMap} processed, ${index.mappedSources} uploaded). Please try again later.`,
+        {},
+        true
+      ),
     };
   }
 
   if (index.scripts.length === 0) {
     return {
       ok: false,
-      response: {
-        content: [
-          {
-            type: "text",
-            text: "No script sources have been received from the Roblox client yet.",
-          },
-        ],
-      },
+      response: toolTextResponse(
+        "No script sources have been received from the Roblox client yet.",
+        {},
+        true
+      ),
     };
   }
 

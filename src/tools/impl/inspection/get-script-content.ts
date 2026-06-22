@@ -1,21 +1,43 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { sendAndWait } from "../../factory.js";
+import { clientStampPrefix, sendAndWait, toolTextResponse } from "../../factory.js";
 import { isSecondaryRelay, relayToolToApi } from "../../factory.js";
+import { maxOutputCharsSchema } from "../../schemas.js";
 import { fetchScriptSearchIndex, type ScriptSearchDocument } from "./script-sources.js";
 
-function formatSourceRange(source: string, startLine?: number, endLine?: number): string {
-  if (startLine === undefined) return source;
+const DEFAULT_SCRIPT_MAX_LINES = 80;
+const HARD_SCRIPT_MAX_LINES = 2000;
 
+function normalizeMaxLines(maxLines: number): number {
+  if (!Number.isFinite(maxLines)) return DEFAULT_SCRIPT_MAX_LINES;
+  return Math.min(HARD_SCRIPT_MAX_LINES, Math.max(1, Math.floor(maxLines)));
+}
+
+function formatSourceRange(
+  source: string,
+  startLine?: number,
+  endLine?: number,
+  maxLines: number = DEFAULT_SCRIPT_MAX_LINES
+): string {
   const lines = source.split(/\r?\n/);
   const totalLines = lines.length;
-  const start = Math.max(1, Math.min(Math.floor(startLine), totalLines));
-  const end =
+  const lineBudget = normalizeMaxLines(maxLines);
+  const start =
+    startLine === undefined
+      ? 1
+      : Math.max(1, Math.min(Math.floor(startLine), totalLines));
+  const requestedEnd =
     endLine === undefined
       ? totalLines
       : Math.max(start, Math.min(Math.floor(endLine), totalLines));
+  const end = Math.min(requestedEnd, start + lineBudget - 1);
+  const truncated = end < requestedEnd;
+  const header = `-- Lines ${start}-${end} of ${totalLines}`;
+  const footer = truncated
+    ? `\n-- Output truncated to ${lineBudget} lines. Rerun with startLine=${end + 1} or a tighter range to continue.`
+    : "";
 
-  return `-- Lines ${start}-${end} of ${totalLines}\n` + lines.slice(start - 1, end).join("\n");
+  return `${header}\n${lines.slice(start - 1, end).join("\n")}${footer}`;
 }
 
 function findStoredScript(
@@ -53,18 +75,24 @@ export default function register(server: McpServer): void {
         startLine: z
           .number()
           .describe(
-            "Optional start line number (1-based) to return only a range of lines from the decompiled script. If omitted, returns the full script."
+            "Optional start line number (1-based). If omitted, returns a bounded preview from line 1 instead of the full script."
           )
           .optional(),
         endLine: z
           .number()
           .describe(
-            "Optional end line number (1-based, inclusive) to return only a range of lines. Defaults to end of script if startLine is set but endLine is omitted."
+            "Optional end line number (1-based, inclusive). If omitted, returns up to maxLines lines."
           )
           .optional(),
+        maxLines: z
+          .number()
+          .describe("Maximum lines to return (default: 80, max: 2000). Use explicit startLine/endLine ranges for large scripts.")
+          .optional()
+          .default(DEFAULT_SCRIPT_MAX_LINES),
+        maxOutputChars: maxOutputCharsSchema,
       }),
     },
-    async ({ scriptGetterSource, scriptPath, startLine, endLine }) => {
+    async ({ scriptGetterSource, scriptPath, startLine, endLine, maxLines, maxOutputChars }) => {
       // Secondary mode: relay to primary which has the script source index.
       if (isSecondaryRelay()) {
         return relayToolToApi("get-script-content", {
@@ -72,24 +100,18 @@ export default function register(server: McpServer): void {
           ...(scriptPath !== undefined ? { scriptPath } : {}),
           ...(startLine !== undefined ? { startLine } : {}),
           ...(endLine !== undefined ? { endLine } : {}),
+          maxLines,
+          maxOutputChars,
+        }, 60000, {
+          maxOutputChars,
+          truncationHint: "Rerun get-script-content with startLine/endLine or a smaller maxLines value.",
         });
       }
 
       if (scriptGetterSource === undefined && scriptPath === undefined) {
-        return {
-          content: [
-            { type: "text" as const, text: "Must provide either scriptGetterSource or scriptPath." },
-          ],
-        };
+        return toolTextResponse("Must provide either scriptGetterSource or scriptPath.", {}, true);
       } else if (scriptGetterSource !== undefined && scriptPath !== undefined) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "Must provide either scriptGetterSource or scriptPath, not both.",
-            },
-          ],
-        };
+        return toolTextResponse("Must provide either scriptGetterSource or scriptPath, not both.", {}, true);
       }
 
       const scriptProxyMatch = (scriptPath ?? scriptGetterSource ?? "").match(/^<ScriptProxy: (.+)>$/);
@@ -104,14 +126,14 @@ export default function register(server: McpServer): void {
           );
 
           if (storedScript) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: formatSourceRange(storedScript.source, startLine, endLine),
-                },
-              ],
-            };
+            return toolTextResponse(
+              clientStampPrefix() +
+                formatSourceRange(storedScript.source, startLine, endLine, maxLines),
+              {
+                maxOutputChars,
+                truncationHint: "Rerun get-script-content with startLine/endLine or a smaller maxLines value.",
+              }
+            );
           }
         } else if (scriptProxyMatch) {
           return indexResult.response;
@@ -119,17 +141,21 @@ export default function register(server: McpServer): void {
       }
 
       const data = scriptProxyMatch
-        ? { debugId: scriptProxyMatch[1], startLine, endLine }
+        ? { debugId: scriptProxyMatch[1], startLine, endLine, maxLines }
         : {
             source:
               scriptGetterSource === undefined ? `return ${scriptPath}` : scriptGetterSource,
             startLine,
             endLine,
+            maxLines,
           };
 
       return sendAndWait({
         type: "get-script-content",
         data,
+        maxOutputChars,
+        stampClient: true,
+        truncationHint: "Rerun get-script-content with startLine/endLine or a smaller maxLines value.",
         failureMessage: () => "Failed to get script content.",
       });
     }

@@ -1,9 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { loadSemanticSettings, validateSemanticSettings } from "../../../semantic/settings.js";
-import { semanticSearchScripts, type SemanticSearchOutput } from "../../../semantic/vector-index.js";
-import type { ToolTextResponse } from "../../factory.js";
+import { semanticIndexCodebase, semanticSearchScripts, type SemanticSearchOutput } from "../../../semantic/vector-index.js";
+import { clientStampPrefix, toolTextResponse, type ToolTextResponse } from "../../factory.js";
 import { isSecondaryRelay, relayToolToApi } from "../../factory.js";
+import { maxOutputCharsSchema } from "../../schemas.js";
 import { fetchScriptSearchIndex } from "./script-sources.js";
 
 function normalizeLimit(limit: number): number {
@@ -26,7 +27,7 @@ function formatSemanticResults(
   if (isPartialIndex) {
     const pct = chunkCount > 0 ? Math.round((embeddedChunks / chunkCount) * 100) : 0;
     parts.push(
-      `⚠️ WARNING: The codebase is NOT fully indexed. Only ${embeddedChunks}/${chunkCount} chunks (${pct}%) have embeddings. ` +
+      `WARNING: The codebase is NOT fully indexed. Only ${embeddedChunks}/${chunkCount} chunks (${pct}%) have embeddings. ` +
       `Results may be incomplete or miss relevant matches. Run a full semantic index from the MCP dashboard to get complete results.`
     );
   }
@@ -62,23 +63,40 @@ export default function register(server: McpServer): void {
           .describe("Natural-language description of the code behavior to find."),
         limit: z
           .number()
-          .describe("Maximum number of semantic matches to return (default: 10, max: 50).")
+          .describe("Maximum number of semantic matches to return (default: 5, max: 50).")
           .optional()
-          .default(10),
+          .default(5),
         minScore: z
           .number()
           .describe("Optional minimum cosine similarity score. Typical useful values are 0.2-0.5.")
           .optional(),
+        requireFullIndex: z
+          .boolean()
+          .describe("When true, build or complete the semantic index before searching so results are not partial (default: true).")
+          .optional()
+          .default(true),
+        indexOnly: z
+          .boolean()
+          .describe("When true, build or refresh the semantic index and return readiness without searching.")
+          .optional()
+          .default(false),
+        maxOutputChars: maxOutputCharsSchema,
       }),
     },
-    async ({ query, limit, minScore }): Promise<ToolTextResponse> => {
+    async ({ query, limit, minScore, requireFullIndex, indexOnly, maxOutputChars }): Promise<ToolTextResponse> => {
       // Secondary mode: script sources and embeddings live on the primary.
       if (isSecondaryRelay()) {
         return relayToolToApi("semantic-search", {
           query,
           limit,
           ...(minScore !== undefined ? { minScore } : {}),
-        }, 120000);
+          requireFullIndex,
+          indexOnly,
+          maxOutputChars,
+        }, 120000, {
+          maxOutputChars,
+          truncationHint: "Rerun semantic-search-scripts with a lower limit or higher minScore.",
+        });
       }
 
       const indexResult = fetchScriptSearchIndex({ allowIncomplete: true });
@@ -94,10 +112,24 @@ export default function register(server: McpServer): void {
               text: `Semantic search is not configured: ${settingsError} Configure it from the MCP dashboard.`,
             },
           ],
+          isError: true,
         };
       }
 
       try {
+        if (indexOnly || requireFullIndex) {
+          const { chunkCount, embeddedChunks } = await semanticIndexCodebase(
+            indexResult.index,
+            settings
+          );
+          if (indexOnly) {
+            return toolTextResponse(
+              `Semantic index ready: ${embeddedChunks}/${chunkCount} chunks embedded.`,
+              { maxOutputChars }
+            );
+          }
+        }
+
         const output = await semanticSearchScripts(
           indexResult.index,
           settings,
@@ -106,14 +138,21 @@ export default function register(server: McpServer): void {
           minScore
         );
 
-        return {
-          content: [{ type: "text", text: formatSemanticResults(query, output) }],
-        };
+        if (requireFullIndex && output.isPartialIndex) {
+          return toolTextResponse(
+            "Semantic search did not complete a full index; refusing partial results. Rerun with requireFullIndex=false only if partial results are acceptable.",
+            {},
+            true
+          );
+        }
+
+        return toolTextResponse(clientStampPrefix() + formatSemanticResults(query, output), {
+          maxOutputChars,
+          truncationHint: "Rerun semantic-search-scripts with a lower limit or higher minScore.",
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: "text", text: `Semantic search failed: ${message}` }],
-        };
+        return toolTextResponse(`Semantic search failed: ${message}`, {}, true);
       }
     }
   );

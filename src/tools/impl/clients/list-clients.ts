@@ -7,6 +7,7 @@ import {
   GetResponseOfIdFromClient,
 } from "../../../bridge/handlers/shared/communication.js";
 import { formatActiveClientListForTool } from "../../../bridge/handlers/shared/registry.js";
+import { toolTextResponse } from "../../factory.js";
 import { NO_CLIENT_ERROR } from "../../errors.js";
 
 export default function register(server: McpServer): void {
@@ -24,14 +25,10 @@ export default function register(server: McpServer): void {
         if (socket && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({ id, type: "list-clients" }));
           const response = await GetResponseOfIdFromClient(id);
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: response?.output ?? response?.error ?? "Failed to list clients.",
-              },
-            ],
-          };
+          if (response?.error || !response?.output) {
+            return toolTextResponse(response?.error ?? "Failed to list clients.", {}, true);
+          }
+          return toolTextResponse(response.output);
         }
         return NO_CLIENT_ERROR;
       }

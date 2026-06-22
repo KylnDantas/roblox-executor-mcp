@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { sendAndWait } from "../../factory.js";
-import { threadContextSchema } from "../../schemas.js";
+import { describeResponse, sendAndWait } from "../../factory.js";
+import { maxOutputCharsSchema, threadContextSchema } from "../../schemas.js";
 
 export default function register(server: McpServer): void {
   server.registerTool(
@@ -9,12 +9,12 @@ export default function register(server: McpServer): void {
     {
       title: "Get data by code",
       description:
-        "Execute Luau in the active Roblox client and return serialized raw Lua values. The code must return values; do not manually JSON-encode them.",
+        "Execute Luau in the active Roblox client and return serialized raw Lua values. Prefer the specialized tools (search-instances, get-descendants-tree, get-script-content, script-grep) for exploration; use this only for small, targeted value probes. The code must return values; do not manually JSON-encode them.",
       inputSchema: z.object({
         code: z
           .string()
           .describe(
-            "The code to execute in the Roblox Game Client (MUST return one or more values). Return raw Lua values - do NOT manually serialize tables or use JSONEncode, the connector handles serialization automatically."
+            "Code to run in the Roblox client (MUST return one or more values). Return small, specific values — never whole instances or large tables. Return raw Lua values; the connector serializes them (do NOT JSONEncode yourself)."
           ),
         threadContext: threadContextSchema,
         timeout: z
@@ -24,9 +24,10 @@ export default function register(server: McpServer): void {
           )
           .optional()
           .default(15000),
+        maxOutputChars: maxOutputCharsSchema,
       }),
     },
-    async ({ code, threadContext, timeout }) => {
+    async ({ code, threadContext, timeout, maxOutputChars }) => {
       console.error(`Executing code in thread ${threadContext}...`);
       const clampedTimeout = Math.min(Math.max(timeout, 1000), 120000);
 
@@ -34,8 +35,11 @@ export default function register(server: McpServer): void {
         type: "get-data-by-code",
         data: { source: `setthreadidentity(${threadContext});${code}` },
         timeoutMs: clampedTimeout,
+        maxOutputChars,
+        stampClient: true,
+        truncationHint: "Rerun get-data-by-code with code that returns fewer fields or pass a smaller maxOutputChars.",
         failureMessage: (response) =>
-          "Failed to get data by code. Response: " + JSON.stringify(response),
+          "Failed to get data by code: " + describeResponse(response),
       });
     }
   );

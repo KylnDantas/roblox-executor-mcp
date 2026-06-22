@@ -1,7 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { ToolTextResponse } from "../../factory.js";
+import { clientStampPrefix, toolTextResponse, type ToolTextResponse } from "../../factory.js";
 import { isSecondaryRelay, relayToolToApi } from "../../factory.js";
+import { maxOutputCharsSchema } from "../../schemas.js";
 import { fetchScriptSearchIndex, type ScriptSearchDocument } from "./script-sources.js";
 
 interface ScriptMatch {
@@ -27,9 +28,10 @@ function compileQuery(query: string, literal: boolean, caseSensitive: boolean): 
   return new RegExp(literal ? escapeRegExp(query) : query, caseSensitive ? "" : "i");
 }
 
-function normalizePositiveInteger(value: number, fallback: number): number {
+/** Clamp an integer into [min, max] with a fallback for non-finite input. */
+function clampInt(value: number, fallback: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return fallback;
-  return Math.max(0, Math.floor(value));
+  return Math.min(max, Math.max(min, Math.floor(value)));
 }
 
 function getLineBlock(lines: string[], lineIndex: number, contextLines: number): string {
@@ -50,13 +52,15 @@ function searchScripts(
   regex: RegExp,
   options: SearchOptions
 ): { matches: ScriptMatch[]; totalMatches: number; limited: boolean } {
-  const limit = normalizePositiveInteger(options.limit, 50);
-  const contextLines = normalizePositiveInteger(options.contextLines, 2);
-  const maxMatchesPerScript = normalizePositiveInteger(options.maxMatchesPerScript, 20);
+  // Clamp every numeric parameter so a single MCP call cannot flood context.
+  // (Mirrors the hard caps the HTTP /api/tool relay already enforces.)
+  const limit = clampInt(options.limit, 10, 1, 100);
+  const contextLines = clampInt(options.contextLines, 1, 0, 10);
+  const maxMatchesPerScript = clampInt(options.maxMatchesPerScript, 3, 1, 50);
   const maxResults =
     options.maxResults === undefined
-      ? undefined
-      : normalizePositiveInteger(options.maxResults, Number.MAX_SAFE_INTEGER);
+      ? 30
+      : clampInt(options.maxResults, 30, 1, 1000);
 
   const matches: ScriptMatch[] = [];
   let totalMatches = 0;
@@ -141,29 +145,30 @@ export default function register(server: McpServer): void {
         query: z
           .string()
           .describe(
-            "The search pattern. Supports JavaScript RegExp syntax: \\d, \\w, \\s, \\b, character classes [a-z], alternation (foo|bar), quantifiers (+, *, ?), groups, lookaheads, etc. Use the literal flag for exact string matching."
+            "Search pattern (JavaScript RegExp syntax). Set literal=true for an exact string match."
           ),
         limit: z
           .number()
-          .describe("Maximum number of scripts to return results from (default: 50)")
+          .describe("Maximum number of scripts to return results from (default: 10)")
           .optional()
-          .default(50),
+          .default(10),
         contextLines: z
           .number()
-          .describe("Number of lines of context to show before and after each match (default: 2)")
+          .describe("Number of lines of context to show before and after each match (default: 1)")
           .optional()
-          .default(2),
+          .default(1),
         maxMatchesPerScript: z
           .number()
-          .describe("Maximum number of matches to return per script (default: 20)")
+          .describe("Maximum number of matches to return per script (default: 3)")
           .optional()
-          .default(20),
+          .default(3),
         maxResults: z
           .number()
           .describe(
-            "Maximum total number of matches across ALL scripts (default: unlimited). Use this to cap total matches, e.g. maxResults=1 to find just the first match."
+            "Maximum total number of matches across ALL scripts (default: 30). Use this to cap total matches, e.g. maxResults=1 to find just the first match."
           )
-          .optional(),
+          .optional()
+          .default(30),
         literal: z
           .boolean()
           .describe(
@@ -176,6 +181,7 @@ export default function register(server: McpServer): void {
           .describe("When false, matches case-insensitively. Equivalent to grep -i. (default: true)")
           .optional()
           .default(true),
+        maxOutputChars: maxOutputCharsSchema,
       }),
     },
     async (options): Promise<ToolTextResponse> => {
@@ -184,8 +190,15 @@ export default function register(server: McpServer): void {
         return relayToolToApi("script-grep", {
           query: options.query,
           limit: options.limit,
+          contextLines: options.contextLines,
+          maxMatchesPerScript: options.maxMatchesPerScript,
+          maxResults: options.maxResults,
           literal: options.literal,
           caseSensitive: options.caseSensitive,
+          maxOutputChars: options.maxOutputChars,
+        }, 60000, {
+          maxOutputChars: options.maxOutputChars,
+          truncationHint: "Rerun script-grep with a narrower query, lower limit, or lower maxResults.",
         });
       }
 
@@ -194,7 +207,7 @@ export default function register(server: McpServer): void {
         regex = compileQuery(options.query, options.literal, options.caseSensitive);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return { content: [{ type: "text", text: `Invalid regex pattern: ${message}` }] };
+        return toolTextResponse(`Invalid regex pattern: ${message}`, {}, true);
       }
 
       const indexResult = await fetchScriptSearchIndex({ allowIncomplete: true });
@@ -211,9 +224,13 @@ export default function register(server: McpServer): void {
         ? ""
         : ` (partial index: ${index.mappedSources}/${index.sourcesToMap} scripts uploaded)`;
 
-      return {
-        content: [{ type: "text", text: formatResults(totalMatches, matches, limited, syncNote) }],
-      };
+      return toolTextResponse(
+        clientStampPrefix() + formatResults(totalMatches, matches, limited, syncNote),
+        {
+          maxOutputChars: options.maxOutputChars,
+          truncationHint: "Rerun script-grep with a narrower query, lower limit, or lower maxResults.",
+        }
+      );
     }
   );
 }

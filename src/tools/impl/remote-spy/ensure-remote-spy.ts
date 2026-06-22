@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { sendAndWait } from "../../factory.js";
+import { describeResponse, sendAndWait } from "../../factory.js";
 
 export default function register(server: McpServer): void {
   server.registerTool(
@@ -16,7 +16,7 @@ export default function register(server: McpServer): void {
         type: "ensure-remote-spy",
         data: {},
         failureMessage: (response) =>
-          "Failed to ensure remote spy. Response: " + JSON.stringify(response),
+          "Failed to ensure remote spy: " + describeResponse(response),
       })
   );
 }

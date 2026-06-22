@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { sendAndWait } from "../../factory.js";
+import { describeResponse, sendAndWait } from "../../factory.js";
+import { maxOutputCharsSchema } from "../../schemas.js";
 
 export default function register(server: McpServer): void {
   server.registerTool(
@@ -8,7 +9,7 @@ export default function register(server: McpServer): void {
     {
       title: "Get captured remote spy logs from Cobalt",
       description:
-        "List captured Cobalt remote and bindable call logs. Requires ensure-remote-spy first; supports direction and name filters to narrow noisy logs.",
+        "List captured Cobalt remote and bindable call logs. Requires ensure-remote-spy first. Defaults to a summary (names + call counts); set summaryOnly=false to include argument payloads. Use direction and name filters to narrow noisy logs.",
       inputSchema: z.object({
         direction: z
           .enum(["Incoming", "Outgoing", "Both"])
@@ -23,17 +24,23 @@ export default function register(server: McpServer): void {
           .optional(),
         limit: z
           .number()
-          .describe("Maximum number of remote logs to return (default: 50)")
-          .optional()
-          .default(50),
-        maxCallsPerRemote: z
-          .number()
-          .describe("Maximum number of recent calls to return per remote (default: 5)")
+          .describe("Maximum number of remote logs to return (default: 5)")
           .optional()
           .default(5),
+        maxCallsPerRemote: z
+          .number()
+          .describe("Maximum number of recent calls to return per remote (default: 1)")
+          .optional()
+          .default(1),
+        summaryOnly: z
+          .boolean()
+          .describe("When true (default), return remote names and call counts without argument payloads. Set false to inspect actual call arguments.")
+          .optional()
+          .default(true),
+        maxOutputChars: maxOutputCharsSchema,
       }),
     },
-    async ({ direction, remoteNameFilter, limit, maxCallsPerRemote }) =>
+    async ({ direction, remoteNameFilter, limit, maxCallsPerRemote, summaryOnly, maxOutputChars }) =>
       sendAndWait({
         type: "get-remote-spy-logs",
         data: {
@@ -41,9 +48,13 @@ export default function register(server: McpServer): void {
           remoteNameFilter: remoteNameFilter || "",
           limit,
           maxCallsPerRemote,
+          summaryOnly,
         },
+        maxOutputChars,
+        stampClient: true,
+        truncationHint: "Rerun get-remote-spy-logs with summaryOnly=true, a remoteNameFilter, lower limit, or lower maxCallsPerRemote.",
         failureMessage: (response) =>
-          "Failed to get remote spy logs. Response: " + JSON.stringify(response),
+          "Failed to get remote spy logs: " + describeResponse(response),
       })
   );
 }

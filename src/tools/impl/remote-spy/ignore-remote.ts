@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { sendAndWait } from "../../factory.js";
+import { describeResponse, sendAndWait } from "../../factory.js";
 
 export default function register(server: McpServer): void {
   server.registerTool(
@@ -26,7 +26,7 @@ export default function register(server: McpServer): void {
         type: "ignore-remote",
         data: { remoteName, direction, shouldIgnore },
         failureMessage: (response) =>
-          "Failed to ignore/unignore remote. Response: " + JSON.stringify(response),
+          "Failed to ignore/unignore remote: " + describeResponse(response),
       })
   );
 }

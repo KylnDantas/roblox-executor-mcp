@@ -20,6 +20,7 @@ import {
   updateProgressJob,
 } from "../../../semantic/progress.js";
 import { readJsonBody } from "../../body.js";
+import { formatToolText } from "../../../tools/factory.js";
 
 
 interface ToolRequest {
@@ -27,6 +28,9 @@ interface ToolRequest {
   clientId?: string;
   [key: string]: unknown;
 }
+
+const DEFAULT_SCRIPT_MAX_LINES = 80;
+const HARD_SCRIPT_MAX_LINES = 2000;
 
 function jsonOk(res: ServerResponse, data: unknown): void {
   res.writeHead(200, { "Content-Type": "application/json" });
@@ -36,6 +40,48 @@ function jsonOk(res: ServerResponse, data: unknown): void {
 function jsonErr(res: ServerResponse, error: string): void {
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error }));
+}
+
+function numberParam(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(parsed)));
+}
+
+function resultText(
+  value: unknown,
+  params: Record<string, unknown>,
+  truncationHint?: string
+): string {
+  return formatToolText(String(value), {
+    maxOutputChars: params.maxOutputChars as number | undefined,
+    truncationHint,
+  });
+}
+
+function formatSourceRange(
+  source: string,
+  startLine?: number,
+  endLine?: number,
+  maxLines: number = DEFAULT_SCRIPT_MAX_LINES
+): string {
+  const lines = source.split(/\r?\n/);
+  const totalLines = lines.length;
+  const lineBudget = numberParam(maxLines, DEFAULT_SCRIPT_MAX_LINES, 1, HARD_SCRIPT_MAX_LINES);
+  const start =
+    startLine === undefined
+      ? 1
+      : Math.max(1, Math.min(Math.floor(startLine), totalLines));
+  const requestedEnd =
+    endLine === undefined
+      ? totalLines
+      : Math.max(start, Math.min(Math.floor(endLine), totalLines));
+  const end = Math.min(requestedEnd, start + lineBudget - 1);
+  const truncated = end < requestedEnd;
+  const footer = truncated
+    ? `\n-- Output truncated to ${lineBudget} lines. Rerun with startLine=${end + 1} or a tighter range to continue.`
+    : "";
+  return `-- Lines ${start}-${end} of ${totalLines}\n${lines.slice(start - 1, end).join("\n")}${footer}`;
 }
 
 function formatSemanticSearchResult(
@@ -50,7 +96,7 @@ function formatSemanticSearchResult(
   if (isPartialIndex) {
     const pct = chunkCount > 0 ? Math.round((embeddedChunks / chunkCount) * 100) : 0;
     parts.push(
-      `⚠️ WARNING: The codebase is NOT fully indexed. Only ${embeddedChunks}/${chunkCount} chunks (${pct}%) have embeddings. Results may be incomplete.`
+      `WARNING: The codebase is NOT fully indexed. Only ${embeddedChunks}/${chunkCount} chunks (${pct}%) have embeddings. Results may be incomplete.`
     );
   }
 
@@ -102,7 +148,10 @@ export async function POST(req: IncomingMessage, res: ServerResponse): Promise<v
 
       const literal = params.literal === true;
       const caseSensitive = params.caseSensitive !== false;
-      const limit = Math.min(Math.max(Number(params.limit) || 50, 1), 100);
+      const limit = numberParam(params.limit, 10, 1, 100);
+      const contextLines = numberParam(params.contextLines, 1, 0, 10);
+      const maxMatchesPerScript = numberParam(params.maxMatchesPerScript, 3, 1, 50);
+      const maxResults = numberParam(params.maxResults, 30, 1, 1000);
 
       let regex: RegExp;
       try {
@@ -114,16 +163,20 @@ export async function POST(req: IncomingMessage, res: ServerResponse): Promise<v
 
       const results: { path: string; matches: string[] }[] = [];
       let totalMatches = 0;
+      let limited = false;
 
       for (const script of index.scripts) {
-        if (results.length >= limit) break;
+        if (results.length >= limit || totalMatches >= maxResults) {
+          limited = true;
+          break;
+        }
         const lines = script.source.split(/\r?\n/);
         const matches: string[] = [];
 
-        for (let i = 0; i < lines.length && matches.length < 20; i++) {
+        for (let i = 0; i < lines.length && matches.length < maxMatchesPerScript && totalMatches + matches.length < maxResults; i++) {
           if (regex.test(lines[i] ?? "")) {
-            const start = Math.max(0, i - 2);
-            const end = Math.min(lines.length - 1, i + 2);
+            const start = Math.max(0, i - contextLines);
+            const end = Math.min(lines.length - 1, i + contextLines);
             const block: string[] = [];
             for (let j = start; j <= end; j++) {
               block.push(`${j === i ? ">" : " "} ${j + 1}: ${lines[j] ?? ""}`);
@@ -138,13 +191,20 @@ export async function POST(req: IncomingMessage, res: ServerResponse): Promise<v
             path: script.path || `<ScriptProxy: ${script.debugId}>`,
             matches,
           });
+          if (matches.length >= maxMatchesPerScript || totalMatches >= maxResults) limited = true;
         }
       }
 
-      const header = `${totalMatches} match(es) across ${results.length} script(s)`;
+      const header = `${totalMatches} match(es) across ${results.length} script(s)${limited ? " (results limited)" : ""}`;
       const body = results.map(r => `[${r.path}] ${r.matches.length} match(es)\n\n${r.matches.join("\n\n")}`).join("\n\n---\n\n");
 
-      return jsonOk(res, { result: header + (body ? "\n\n" + body : "") });
+      return jsonOk(res, {
+        result: resultText(
+          header + (body ? "\n\n" + body : ""),
+          params,
+          "Rerun script-grep with a narrower query, lower limit, or lower maxResults."
+        ),
+      });
     }
 
 
@@ -168,8 +228,10 @@ export async function POST(req: IncomingMessage, res: ServerResponse): Promise<v
       const settingsError = validateSemanticSettings(settings);
       if (settingsError) return jsonErr(res, `Semantic search not configured: ${settingsError}`);
 
-      const limit = Math.min(Math.max(Number(params.limit) || 10, 1), 50);
+      const limit = numberParam(params.limit, 5, 1, 50);
       const indexOnly = params.indexOnly === true;
+      const requireFullIndex = params.requireFullIndex !== false;
+      const minScore = typeof params.minScore === "number" ? params.minScore : undefined;
 
       const job = createProgressJob(
         indexOnly ? "semantic-index" : "semantic-search",
@@ -178,14 +240,16 @@ export async function POST(req: IncomingMessage, res: ServerResponse): Promise<v
 
       void (async () => {
         try {
-          if (indexOnly) {
+          if (indexOnly || requireFullIndex) {
             const { chunkCount, embeddedChunks } = await semanticIndexCodebase(
               index,
               settings,
               (progress) => updateProgressJob(job.id, progress)
             );
-            completeProgressJob(job.id, formatSemanticIndexResult(chunkCount, embeddedChunks));
-            return;
+            if (indexOnly) {
+              completeProgressJob(job.id, formatSemanticIndexResult(chunkCount, embeddedChunks));
+              return;
+            }
           }
 
           const output = await semanticSearchScripts(
@@ -193,11 +257,23 @@ export async function POST(req: IncomingMessage, res: ServerResponse): Promise<v
             settings,
             query,
             limit,
-            undefined,
+            minScore,
             (progress) => updateProgressJob(job.id, progress)
           );
 
-          completeProgressJob(job.id, formatSemanticSearchResult(query, output.results, output.chunkCount, output.embeddedChunks, output.isPartialIndex));
+          if (requireFullIndex && output.isPartialIndex) {
+            failProgressJob(job.id, "Semantic search did not complete a full index; refusing partial results.");
+            return;
+          }
+
+          completeProgressJob(
+            job.id,
+            resultText(
+              formatSemanticSearchResult(query, output.results, output.chunkCount, output.embeddedChunks, output.isPartialIndex),
+              params,
+              "Rerun semantic-search-scripts with a lower limit or higher minScore."
+            )
+          );
         } catch (error) {
           failProgressJob(
             job.id,
@@ -217,6 +293,7 @@ export async function POST(req: IncomingMessage, res: ServerResponse): Promise<v
       const scriptGetterSource = params.scriptGetterSource as string | undefined;
       const startLine = params.startLine as number | undefined;
       const endLine = params.endLine as number | undefined;
+      const maxLines = numberParam(params.maxLines, DEFAULT_SCRIPT_MAX_LINES, 1, HARD_SCRIPT_MAX_LINES);
 
       if (!scriptPath && !scriptGetterSource) return jsonErr(res, "Missing 'scriptPath' or 'scriptGetterSource'.");
 
@@ -235,33 +312,38 @@ export async function POST(req: IncomingMessage, res: ServerResponse): Promise<v
         );
 
         if (stored) {
-          let source = stored.source;
-          if (startLine !== undefined) {
-            const lines = source.split(/\r?\n/);
-            const total = lines.length;
-            const start = Math.max(1, Math.min(Math.floor(startLine), total));
-            const end = endLine === undefined ? total : Math.max(start, Math.min(Math.floor(endLine), total));
-            source = `-- Lines ${start}-${end} of ${total}\n` + lines.slice(start - 1, end).join("\n");
-          }
-          return jsonOk(res, { result: source });
+          return jsonOk(res, {
+            result: resultText(
+              formatSourceRange(stored.source, startLine, endLine, maxLines),
+              params,
+              "Rerun get-script-content with startLine/endLine or a smaller maxLines value."
+            ),
+          });
         }
       }
 
       // Fall back to dispatching to Roblox client
       const data: Record<string, unknown> = scriptProxyMatch
-        ? { debugId: scriptProxyMatch[1], startLine, endLine }
+        ? { debugId: scriptProxyMatch[1], startLine, endLine, maxLines }
         : {
             source: scriptGetterSource === undefined ? `return ${scriptPath}` : scriptGetterSource,
             startLine,
             endLine,
+            maxLines,
           };
 
       const callId = SendArbitraryDataToClient("get-script-content", data, undefined, target.clientId);
       if (!callId) return jsonErr(res, "Failed to dispatch to client.");
       if (callId === "INVALID_CLIENT") return jsonErr(res, "Invalid client.");
       const response = await GetResponseOfIdFromClient(callId, 15000);
-      if (response.error) return jsonOk(res, { result: `Error: ${response.error}` });
-      return jsonOk(res, { result: response.output ?? "No output returned." });
+      if (response.error) return jsonErr(res, response.error);
+      return jsonOk(res, {
+        result: resultText(
+          response.output ?? "No output returned.",
+          params,
+          "Rerun get-script-content with startLine/endLine or a smaller maxLines value."
+        ),
+      });
     }
 
     // ── Client-dispatched tools ───────────────────────────────────────────────
@@ -289,8 +371,14 @@ export async function POST(req: IncomingMessage, res: ServerResponse): Promise<v
       if (!callId) return jsonErr(res, "Failed to dispatch to client.");
       if (callId === "INVALID_CLIENT") return jsonErr(res, "Invalid client.");
       const response = await GetResponseOfIdFromClient(callId, timeout);
-      if (response.error) return jsonOk(res, { result: `Error: ${response.error}` });
-      return jsonOk(res, { result: response.output ?? "No output returned." });
+      if (response.error) return jsonErr(res, response.error);
+      return jsonOk(res, {
+        result: resultText(
+          response.output ?? "No output returned.",
+          params,
+          "Rerun get-data-by-code with code that returns fewer fields or pass a smaller maxOutputChars."
+        ),
+      });
     }
 
     if (type === "execute") {
@@ -308,17 +396,22 @@ export async function POST(req: IncomingMessage, res: ServerResponse): Promise<v
       if (!selector) return jsonErr(res, "Missing 'selector' parameter.");
       data.selector = selector;
       data.root = params.root || "game";
-      data.limit = Math.min(Number(params.limit) || 50, 100);
+      data.limit = numberParam(params.limit, 20, 1, 100);
     } else if (type === "get-console-output") {
-      data.limit = Math.min(Number(params.limit) || 50, 200);
+      data.limit = numberParam(params.limit, 10, 1, 200);
       if (typeof params.logsOrder === "string") data.logsOrder = params.logsOrder;
       if (typeof params.filter === "string") data.filter = params.filter;
+      if (typeof params.summaryOnly === "boolean") data.summaryOnly = params.summaryOnly;
     } else if (type === "get-descendants-tree") {
       const root = params.root as string;
       if (!root) return jsonErr(res, "Missing 'root' parameter.");
       data.root = root;
-      data.maxDepth = Math.min(Number(params.maxDepth) || 3, 10);
+      data.maxDepth = numberParam(params.maxDepth, 2, 0, 5);
+      data.maxChildren = numberParam(params.maxChildren, 20, 1, 30);
       if (params.classFilter) data.classFilter = params.classFilter;
+      if (typeof params.summaryOnly === "boolean") data.summaryOnly = params.summaryOnly;
+    } else if (type === "get-game-info") {
+      data.includeDescription = params.includeDescription === true;
     }
 
     const callId = SendArbitraryDataToClient(robloxType, data, undefined, target.clientId);
@@ -326,8 +419,14 @@ export async function POST(req: IncomingMessage, res: ServerResponse): Promise<v
     if (callId === "INVALID_CLIENT") return jsonErr(res, "Invalid client.");
 
     const response = await GetResponseOfIdFromClient(callId, 15000);
-    if (response.error) return jsonOk(res, { result: `Error: ${response.error}` });
-    return jsonOk(res, { result: response.output ?? "No output returned." });
+    if (response.error) return jsonErr(res, response.error);
+    return jsonOk(res, {
+      result: resultText(
+        response.output ?? "No output returned.",
+        params,
+        "Rerun with narrower filters, lower limits, or summaryOnly=true where supported."
+      ),
+    });
 
 
 

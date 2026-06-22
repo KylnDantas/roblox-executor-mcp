@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { setActiveClientId } from "../../../bridge/handlers/shared/registry.js";
+import { resolveTargetClient, setActiveClientId } from "../../../bridge/handlers/shared/registry.js";
+import { toolTextResponse } from "../../factory.js";
 
 export default function register(server: McpServer): void {
   server.registerTool(
@@ -18,9 +19,25 @@ export default function register(server: McpServer): void {
       }),
     },
     async ({ clientId }) => {
+      const target = resolveTargetClient(clientId);
+      if (!target) {
+        return toolTextResponse(
+          `Invalid or inactive client ID: ${clientId}. Use list-clients to get active client IDs.`,
+          {},
+          true
+        );
+      }
+
       setActiveClientId(clientId);
       return {
-        content: [{ type: "text" as const, text: `Active client set to ${clientId}.` }],
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `Active client set to ${clientId} ` +
+              `(${target.username} @ ${target.placeName}, ${target.transport}).`,
+          },
+        ],
       };
     }
   );

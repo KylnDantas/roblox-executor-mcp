@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { sendAndWait } from "../../factory.js";
+import { describeResponse, sendAndWait } from "../../factory.js";
 
 export default function register(server: McpServer): void {
   server.registerTool(
@@ -32,7 +32,7 @@ export default function register(server: McpServer): void {
         data: { path, text, string: text, enter, useKeyPress },
         failureField: "error",
         failureMessage: (response) =>
-          "Failed to type into TextBox. Response: " + JSON.stringify(response),
+          "Failed to type into TextBox: " + describeResponse(response),
         successMessage: (response) =>
           (response.output as string | undefined) || "Successfully typed into TextBox.",
       })

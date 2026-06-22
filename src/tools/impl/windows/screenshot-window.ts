@@ -14,7 +14,7 @@ export default function register(server: McpServer): void {
     {
       title: "Take a screenshot of a Roblox window",
       description:
-        "Capture an actual OS screenshot of a Roblox window via Windows APIs. Provide pid when multiple windows are open; secondary servers relay capture to the primary host.",
+        "Capture an actual OS screenshot of a Roblox window via Windows APIs. Returns a downscaled JPEG to limit vision-token cost. Provide pid when multiple windows are open; secondary servers relay capture to the primary host.",
       inputSchema: z.object({
         pid: z
           .number()
@@ -22,9 +22,14 @@ export default function register(server: McpServer): void {
             "The PID (process ID) of the Roblox window to capture. If omitted and only one Roblox window exists, it is captured automatically. If multiple windows exist and no pid is provided, the tool returns a list of windows for disambiguation."
           )
           .optional(),
+        maxWidth: z
+          .number()
+          .describe("Maximum image width in pixels; the screenshot is downscaled to this (default: 1280). Lower values cost fewer vision tokens.")
+          .optional()
+          .default(1280),
       }),
     },
-    async ({ pid }) => {
+    async ({ pid, maxWidth }) => {
       // Secondary mode: relay to primary via HTTP — works even if this machine isn't Windows.
       if (getInstanceRole() === "secondary") {
         try {
@@ -33,7 +38,7 @@ export default function register(server: McpServer): void {
           const resp = await fetch(targetUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ pid }),
+            body: JSON.stringify({ pid, maxWidth }),
           });
           const result = (await resp.json()) as ScreenshotResult;
           return renderScreenshotResult(result);
@@ -65,7 +70,7 @@ export default function register(server: McpServer): void {
       }
 
       try {
-        return renderScreenshotResult(performScreenshot(pid));
+        return renderScreenshotResult(performScreenshot(pid, maxWidth));
       } catch (err) {
         return {
           content: [
@@ -109,7 +114,7 @@ function renderScreenshotResult(result: ScreenshotResult) {
         {
           type: "image" as const,
           data: result.imageBase64,
-          mimeType: "image/png",
+          mimeType: result.mimeType ?? "image/jpeg",
         },
       ],
     };

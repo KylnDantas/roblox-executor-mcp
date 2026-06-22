@@ -65,6 +65,73 @@ end
 local LuaEncode = loadstring(game:HttpGet("https://raw.githubusercontent.com/chadhyatt/LuaEncode/refs/heads/master/src/LuaEncode.lua"))()
 local cloneref = cloneref or function(x) return x end
 
+--// Bounded serialization: cap depth / entries / string length and render
+--// Instances as their path so structured tool responses can't flood the
+--// model context with raw dumps before the server-side char limit applies. \\--
+local SANITIZE_MAX_DEPTH = 8
+local SANITIZE_MAX_ENTRIES = 60
+local SANITIZE_MAX_STRING = 500
+
+local function SanitizeForOutput(value, depth, seen)
+    depth = depth or 0
+    local valueType = typeof(value)
+
+    if valueType == "Instance" then
+        local ok, full = pcall(function() return value:GetFullName() end)
+        return ok and full or tostring(value)
+    elseif valueType == "string" then
+        if #value > SANITIZE_MAX_STRING then
+            return string.sub(value, 1, SANITIZE_MAX_STRING)
+                .. "…(+" .. (#value - SANITIZE_MAX_STRING) .. " chars omitted)"
+        end
+        return value
+    elseif valueType == "number" or valueType == "boolean" or valueType == "nil" then
+        return value
+    elseif valueType ~= "table" then
+        -- functions, userdata, threads, Vector3, CFrame, etc.
+        return tostring(value)
+    end
+
+    if depth >= SANITIZE_MAX_DEPTH then
+        return "<table: max depth reached>"
+    end
+
+    seen = seen or {}
+    if seen[value] then
+        return "<cyclic table>"
+    end
+    seen[value] = true
+
+    local result = {}
+    local count = 0
+    local omitted = 0
+    for k, v in pairs(value) do
+        if count >= SANITIZE_MAX_ENTRIES then
+            omitted += 1
+            continue
+        end
+        count += 1
+        local key = k
+        if typeof(k) ~= "string" and typeof(k) ~= "number" then
+            key = tostring(k)
+        end
+        result[key] = SanitizeForOutput(v, depth + 1, seen)
+    end
+    if omitted > 0 then
+        result["__omitted"] = omitted .. " more entries omitted"
+    end
+
+    seen[value] = nil
+    return result
+end
+
+--// Strip the decompiler banner line (e.g. "-- Decompiled with lua.expert")
+--// so it doesn't repeat as noise across every script read/grep/search. \\--
+local function StripDecompilerBanner(source)
+    if typeof(source) ~= "string" then return source end
+    return (string.gsub(source, "^%s*%-%-[^\n]*[Dd]ecompiled[^\n]*\n", "", 1))
+end
+
 local KonstantDecompile = CreateDecompileFunction("Konstant", { Endpoint = "http://api.plusgiant5.com/konstant/decompile" })
 local MedalDecompile = CreateDecompileFunction("Medal", {
     Endpoint = "https://medal.upio.dev/decompile",
@@ -205,14 +272,14 @@ local BaseBridge = {}; do
             }
         end
         
-        local output = message
+        local output = SanitizeForOutput(message)
         if typeof(output) ~= "table" then
             output = { output }
         end
     
         return {
             output = LuaEncode(output, {
-                Prettify = true
+                Prettify = false
             }),
             success = true,
             id = id
@@ -754,7 +821,7 @@ local function DecompileScriptSource(script)
             continue
         end
 
-        return decompOutput
+        return StripDecompilerBanner(decompOutput)
     end
 
     return nil, "Failed to decompile script after 3 attempts."
@@ -1004,25 +1071,29 @@ while true do
     end)
 
     Bridge:BindToTypeRaw("get-console-output", function(data)
-        local limit = data.limit or 50
+        local limit = math.max(1, math.min(tonumber(data.limit) or 20, 200))
         local logsOrder = data.logsOrder or "NewestFirst"
         local filter = data.filter
         local hasFilter = typeof(filter) == "string" and filter ~= ""
+        local summaryOnly = data.summaryOnly == true
 
         local logs = LogService:GetLogHistory()
         local results = {}
         local matchedCount = 0
+        local countsByLevel = {}
 
         local function matchesFilter(logEntry)
             if not hasFilter then return true end
             return string.find(logEntry.message, filter, 1, true) ~= nil
         end
 
-        local function escapeLogMessage(message)
+        local MAX_LOG_MESSAGE_CHARS = 500
+        local function formatLogMessage(message)
             local output = tostring(message or "")
-            output = string.gsub(output, "&", "&amp;")
-            output = string.gsub(output, "<", "&lt;")
-            output = string.gsub(output, ">", "&gt;")
+            if #output > MAX_LOG_MESSAGE_CHARS then
+                output = string.sub(output, 1, MAX_LOG_MESSAGE_CHARS)
+                    .. "…(+" .. (#output - MAX_LOG_MESSAGE_CHARS) .. " chars omitted)"
+            end
             return output
         end
 
@@ -1032,6 +1103,8 @@ while true do
                 if not matchesFilter(logEntry) then continue end
                 
                 matchedCount += 1
+                local levelName = logEntry.messageType and logEntry.messageType.Name or "Unknown"
+                countsByLevel[levelName] = (countsByLevel[levelName] or 0) + 1
                 if #results < limit then
                     table.insert(results, logEntry)
                 end
@@ -1041,6 +1114,8 @@ while true do
                 if not matchesFilter(logEntry) then continue end
                 
                 matchedCount += 1
+                local levelName = logEntry.messageType and logEntry.messageType.Name or "Unknown"
+                countsByLevel[levelName] = (countsByLevel[levelName] or 0) + 1
                 if #results < limit then
                     table.insert(results, logEntry)
                 end
@@ -1048,13 +1123,21 @@ while true do
         end
 
         local outputLines = {}
+        if summaryOnly then
+            table.insert(outputLines, string.format("Matched %d logs.", matchedCount))
+            for levelName, count in countsByLevel do
+                table.insert(outputLines, string.format("%s: %d", levelName, count))
+            end
+            return table.concat(outputLines, "\n")
+        end
+
         table.insert(outputLines, string.format("Displaying %d/%d logs:", #results, matchedCount))
 
         for _, logEntry in results do
             table.insert(outputLines, string.format(
-                '<log level="%s" time={%s}>%s</log>',
+                "[%s t=%s] %s",
                 logEntry.messageType.Name, tostring(logEntry.timestamp),
-                escapeLogMessage(logEntry.message)
+                formatLogMessage(logEntry.message)
             ))
         end
 
@@ -1103,51 +1186,57 @@ while true do
             end
         end
 
-        --// Line range support \\--
-        if data.startLine then
-            local lines = {}
-            local pos = 1
-            local len = #source
-            while pos <= len do
-                local newlinePos = source:find("\n", pos, true)
-                if newlinePos then
-                    table.insert(lines, source:sub(pos, newlinePos - 1))
-                    pos = newlinePos + 1
-                else
-                    table.insert(lines, source:sub(pos))
-                    break
-                end
+        --// Line range support with bounded default preview \\--
+        local lines = {}
+        local pos = 1
+        local len = #source
+        while pos <= len do
+            local newlinePos = source:find("\n", pos, true)
+            if newlinePos then
+                table.insert(lines, source:sub(pos, newlinePos - 1))
+                pos = newlinePos + 1
+            else
+                table.insert(lines, source:sub(pos))
+                break
             end
-
-            local totalLines = #lines
-            local startLine = math.max(1, math.min(data.startLine, totalLines))
-            local endLine = data.endLine and math.max(startLine, math.min(data.endLine, totalLines)) or totalLines
-
-            local sliced = {}
-            for i = startLine, endLine do
-                table.insert(sliced, lines[i])
-            end
-
-            return "-- Lines " .. startLine .. "-" .. endLine .. " of " .. totalLines .. "\n" .. table.concat(sliced, "\n")
         end
 
-        return source
+        local totalLines = #lines
+        local maxLines = math.max(1, math.min(tonumber(data.maxLines) or 200, 2000))
+        local startLine = data.startLine and math.max(1, math.min(data.startLine, totalLines)) or 1
+        local requestedEndLine = data.endLine and math.max(startLine, math.min(data.endLine, totalLines)) or totalLines
+        local endLine = math.min(requestedEndLine, startLine + maxLines - 1)
+
+        local sliced = {}
+        for i = startLine, endLine do
+            table.insert(sliced, lines[i])
+        end
+
+        local footer = ""
+        if endLine < requestedEndLine then
+            footer = "\n-- Output truncated to " .. maxLines .. " lines. Rerun with startLine=" .. (endLine + 1) .. " or a tighter range to continue."
+        end
+
+        return "-- Lines " .. startLine .. "-" .. endLine .. " of " .. totalLines .. "\n" .. table.concat(sliced, "\n") .. footer
     end)
 
     Bridge:BindToType("search-instances", function(data)
         local rootInstance = loadstring("return " .. data.root)()
         local instances = rootInstance:QueryDescendants(data.selector)
         
-        local limit = data.limit or 50
+        local limit = math.max(1, math.min(tonumber(data.limit) or 20, 100))
         local results = {}
         
         for i, instance in instances do
             if i > limit then break end
 
+            local fullName = instance.Name
+            pcall(function() fullName = instance:GetFullName() end)
+
             table.insert(results, {
                 Name = instance.Name,
                 ClassName = instance.ClassName,
-                InstancePath = instance,
+                Path = fullName,
                 DebugId = instance:GetDebugId()
             })
         end
@@ -1161,29 +1250,78 @@ while true do
 
     Bridge:BindToType("get-game-info", function(data)
         local productInfo = MarketplaceService:GetProductInfo(game.PlaceId)
-        
-        return {
+
+        local info = {
             PlaceId = game.PlaceId,
             GameId = game.GameId,
             PlaceVersion = game.PlaceVersion,
             PlaceName = productInfo.Name,
-            PlaceDescription = productInfo.Description,
             Creator = productInfo.Creator.Name,
             CreatorType = tostring(productInfo.Creator.CreatorType),
             CreatorId = productInfo.Creator.CreatorTargetId,
             JobId = game.JobId,
             ServerType = RobloxReplicatedStorage.GetServerType:InvokeServer()
         }
+
+        -- The marketplace description can be multi-kB of marketing text that is
+        -- pure noise for debugging, so omit it unless explicitly requested.
+        if data.includeDescription == true then
+            info.PlaceDescription = productInfo.Description
+        end
+
+        return info
     end)
 
     Bridge:BindToType("get-descendants-tree", function(data)
         local rootInstance = loadstring("return " .. data.root)()
         assert(typeof(rootInstance) == "Instance", "Root path did not resolve to a valid Instance.")
 
-        local maxDepth = data.maxDepth or 3
-        local maxChildren = data.maxChildren or 50
+        local maxDepth = math.max(0, math.min(tonumber(data.maxDepth) or 2, 5))
+        local maxChildren = math.max(1, math.min(tonumber(data.maxChildren) or 20, 30))
         local classFilter = data.classFilter or ""
         local hasFilter = classFilter ~= ""
+        local summaryOnly = data.summaryOnly == true
+        local MAX_TREE_NODES = 300
+        local nodeBudget = MAX_TREE_NODES
+        local budgetHit = false
+
+        if summaryOnly then
+            local classCounts = {}
+            local visited = 0
+            local matched = 0
+
+            local function walk(instance, depth)
+                if depth > maxDepth then
+                    return
+                end
+
+                for _, child in instance:GetChildren() do
+                    visited += 1
+                    if not hasFilter or child:IsA(classFilter) then
+                        matched += 1
+                        classCounts[child.ClassName] = (classCounts[child.ClassName] or 0) + 1
+                    end
+                    if depth < maxDepth then
+                        walk(child, depth + 1)
+                    end
+                end
+            end
+
+            walk(rootInstance, 1)
+
+            return {
+                Root = {
+                    Name = rootInstance.Name,
+                    ClassName = rootInstance.ClassName,
+                    ChildCount = #rootInstance:GetChildren(),
+                },
+                MaxDepth = maxDepth,
+                ClassFilter = if hasFilter then classFilter else nil,
+                VisitedDescendants = visited,
+                MatchedDescendants = matched,
+                ClassCounts = classCounts,
+            }
+        end
 
         local function buildTree(instance, depth)
             if depth > maxDepth then
@@ -1197,6 +1335,10 @@ while true do
 
             for _, child in children do
                 if shown >= maxChildren then break end
+                if nodeBudget <= 0 then
+                    budgetHit = true
+                    break
+                end
 
                 if hasFilter and not child:IsA(classFilter) then
                     -- Even if this child doesn't match, check if any descendant might
@@ -1210,6 +1352,8 @@ while true do
                     end
                     continue
                 end
+
+                nodeBudget -= 1
 
                 local node = {
                     Name = child.Name,
@@ -1237,7 +1381,11 @@ while true do
             }
         end
 
-        return buildTree(rootInstance, 0)
+        local tree = buildTree(rootInstance, 0)
+        if budgetHit and typeof(tree) == "table" then
+            tree.Note = "Output capped at " .. MAX_TREE_NODES .. " nodes. Narrow with classFilter, lower maxDepth, or summaryOnly=true."
+        end
+        return tree
     end)
 
     Bridge:BindToType("ensure-remote-spy", function(data)
@@ -1275,8 +1423,9 @@ while true do
 
         local direction = data.direction or "Both"
         local nameFilter = data.remoteNameFilter or ""
-        local limit = data.limit or 50
-        local maxCallsPerRemote = data.maxCallsPerRemote or 5
+        local limit = math.max(1, math.min(tonumber(data.limit) or 10, 100))
+        local maxCallsPerRemote = math.max(0, math.min(tonumber(data.maxCallsPerRemote) or 2, 20))
+        local summaryOnly = data.summaryOnly == true
         local hasNameFilter = nameFilter ~= ""
 
         local function ProcessLogs(logTable, directionLabel)
@@ -1303,18 +1452,20 @@ while true do
                 local totalCalls = #log.Calls
                 local startIdx = math.max(1, totalCalls - maxCallsPerRemote + 1)
 
-                for i = startIdx, totalCalls do
-                    local call = log.Calls[i]
-                    if not call then continue end
+                if not summaryOnly then
+                    for i = startIdx, totalCalls do
+                        local call = log.Calls[i]
+                        if not call then continue end
 
-                    table.insert(recentCalls, {
-                        Index = i,
-                        Arguments = call.Arguments,
-                        Origin = call.Origin,
-                        IsExecutor = call.IsExecutor or false,
-                        IsActor = call.IsActor or false,
-                        Line = call.Line,
-                    })
+                        table.insert(recentCalls, {
+                            Index = i,
+                            Arguments = call.Arguments,
+                            Origin = call.Origin,
+                            IsExecutor = call.IsExecutor or false,
+                            IsActor = call.IsActor or false,
+                            Line = call.Line,
+                        })
+                    end
                 end
 
                 table.insert(results, {
@@ -1325,7 +1476,7 @@ while true do
                     TotalCalls = totalCalls,
                     Ignored = log.Ignored,
                     Blocked = log.Blocked,
-                    RecentCalls = recentCalls,
+                    RecentCalls = if summaryOnly then nil else recentCalls,
                 })
             end
 

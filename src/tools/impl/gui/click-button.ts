@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { sendAndWait } from "../../factory.js";
+import { describeResponse, sendAndWait } from "../../factory.js";
 
 export default function register(server: McpServer): void {
   server.registerTool(
@@ -25,7 +25,7 @@ export default function register(server: McpServer): void {
         data: { path, action },
         failureField: "error",
         failureMessage: (response) =>
-          "Failed to click Button. Response: " + JSON.stringify(response),
+          "Failed to click Button: " + describeResponse(response),
         successMessage: (response) =>
           (response.output as string | undefined) || "Successfully fired click signals on Button.",
       })

@@ -92,16 +92,16 @@ export function formatActiveClientListForTool(): string {
     return "No Roblox clients are currently connected.";
   }
 
-  const clientList = active.map((c) => ({
-    clientId: c.clientId,
-    username: c.username,
-    placeId: c.placeId,
-    jobId: c.jobId,
-    placeName: c.placeName,
-    transport: c.transport,
-  }));
-
-  return JSON.stringify(clientList, null, 2);
+  // Compact one-line-per-client format to minimize tokens vs pretty JSON.
+  return active
+    .map((c) => {
+      const marker = c.clientId === activeClientId ? "* " : "  ";
+      return (
+        `${marker}${c.clientId} | ${c.username ?? "?"} @ ${c.placeName ?? c.placeId} ` +
+        `(place=${c.placeId} job=${c.jobId} ${c.transport})`
+      );
+    })
+    .join("\n");
 }
 
 export function resolveTargetClient(clientId?: string): RobloxClient | null {

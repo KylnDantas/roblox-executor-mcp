@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { sendAndWait } from "../../factory.js";
+import { describeResponse, sendAndWait } from "../../factory.js";
+import { maxOutputCharsSchema } from "../../schemas.js";
 
 export default function register(server: McpServer): void {
   server.registerTool(
@@ -13,7 +14,7 @@ export default function register(server: McpServer): void {
         selector: z
           .string()
           .describe(
-            "Selector string to filter instances. Supports classes (Part), tags (.Tagged), names (#HumanoidRootPart), properties ([CanCollide = false]), attributes ([$QuestId] or [$Health = 100]), child/descendant combinators (> and >>), OR selectors (,), :not(), and :has(); chain selectors for AND logic, e.g. Part.Tagged[Anchored = false]."
+            "QueryDescendants selector. Supports class (Part), tag (.Tagged), name (#HumanoidRootPart), property ([CanCollide = false]), attribute ([$QuestId]), combinators (> >>), OR (,), :not(), :has(). Chain for AND, e.g. Part.Tagged[Anchored = false]."
           ),
         root: z
           .string()
@@ -24,17 +25,21 @@ export default function register(server: McpServer): void {
           .default("game"),
         limit: z
           .number()
-          .describe("Maximum number of results to return (default: 50, to avoid overwhelming output)")
+          .describe("Maximum number of results to return (default: 20, to avoid overwhelming output)")
           .optional()
-          .default(50),
+          .default(20),
+        maxOutputChars: maxOutputCharsSchema,
       }),
     },
-    async ({ selector, root, limit }) =>
+    async ({ selector, root, limit, maxOutputChars }) =>
       sendAndWait({
         type: "search-instances",
         data: { selector, root, limit },
+        maxOutputChars,
+        stampClient: true,
+        truncationHint: "Rerun search-instances with a narrower selector, tighter root, or lower limit.",
         failureMessage: (response) =>
-          "Failed to search instances. Response: " + JSON.stringify(response),
+          "Failed to search instances: " + describeResponse(response),
       })
   );
 }
