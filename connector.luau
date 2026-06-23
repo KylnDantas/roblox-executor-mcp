@@ -476,6 +476,7 @@ local HTTPBridge = setmetatable({}, {__index = BaseBridge}); do
             local consecutiveFailures = 0
             
             while self.Connected do
+                local gotCommands = false
                 local success, _ = pcall(function()
                     local pollUrl = "http://" .. BridgeURL .. "/poll"
                     if self.ClientId then
@@ -501,22 +502,30 @@ local HTTPBridge = setmetatable({}, {__index = BaseBridge}); do
                     --// Handle response \\--
                     if response.Body and response.Body ~= "" then
                         local data = HttpService:JSONDecode(response.Body)
-                        if data == nil or data.type == nil then return end
-                        
-                        task.spawn(function()
-                            local result = self:HandleMessage(data)
-                            if result == nil then return end
-                            
-                            --// Send response back \\--
-                            request({
-                                Url = "http://" .. BridgeURL .. "/respond",
-                                Method = "POST",
-                                Headers = {
-                                    ["Content-Type"] = "application/json"
-                                },
-                                Body = HttpService:JSONEncode(result)
-                            })
-                        end)
+                        local commands = {}
+                        if typeof(data) == "table" and data.type == nil and #data > 0 then
+                            commands = data
+                        elseif typeof(data) == "table" and data.type ~= nil then
+                            commands = { data }
+                        end
+
+                        for _, command in ipairs(commands) do
+                            gotCommands = true
+                            task.spawn(function()
+                                local result = self:HandleMessage(command)
+                                if result == nil then return end
+
+                                --// Send response back \\--
+                                request({
+                                    Url = "http://" .. BridgeURL .. "/respond",
+                                    Method = "POST",
+                                    Headers = {
+                                        ["Content-Type"] = "application/json"
+                                    },
+                                    Body = HttpService:JSONEncode(result)
+                                })
+                            end)
+                        end
                     end
                 end)
     
@@ -527,7 +536,9 @@ local HTTPBridge = setmetatable({}, {__index = BaseBridge}); do
                     end
                 end
     
-                task.wait(self.PollInterval)
+                if not gotCommands then
+                    task.wait(self.PollInterval)
+                end
             end
         end)
     

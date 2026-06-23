@@ -10,6 +10,8 @@ import type {
 } from "../../types.js";
 import { getActiveClients, resolveTargetClient } from "./registry.js";
 
+const MAX_PENDING_HTTP_COMMANDS = 100;
+
 // ─── Instance role ────────────────────────────────────────────────────────────
 let instanceRole: InstanceRole = "primary";
 
@@ -56,7 +58,18 @@ export function SendToClient(target: RobloxClient, message: string): void {
   if (target.transport === "ws" && target.ws && target.ws.readyState === WebSocket.OPEN) {
     target.ws.send(message);
   } else if (target.transport === "http") {
-    target.pendingHttpCommand = message;
+    if (target.pendingHttpCommands.length >= MAX_PENDING_HTTP_COMMANDS) {
+      target.pendingHttpCommands.shift();
+    }
+    target.pendingHttpCommands.push(message);
+
+    const waiter = target.pendingPollResolve;
+    if (waiter) {
+      target.pendingPollResolve = null;
+      const batch = target.pendingHttpCommands;
+      target.pendingHttpCommands = [];
+      waiter(batch);
+    }
   }
 }
 

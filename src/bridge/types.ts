@@ -12,7 +12,8 @@ export interface RobloxClient {
   transport: "ws" | "http";
   ws?: WebSocket;
   lastHttpPoll: number;
-  pendingHttpCommand: string | null;
+  pendingHttpCommands: string[];
+  pendingPollResolve: ((commands: string[]) => void) | null;
 }
 
 export interface RobloxResponse {

@@ -42,7 +42,8 @@ export function registerClient(info: {
     transport: info.transport,
     ws: info.ws,
     lastHttpPoll: Date.now(),
-    pendingHttpCommand: null,
+    pendingHttpCommands: [],
+    pendingPollResolve: null,
   };
   clientRegistry.set(clientId, entry);
   if (info.ws) {
@@ -59,6 +60,7 @@ export function unregisterClient(clientId: string): void {
   if (entry?.ws) {
     wsToClientId.delete(entry.ws);
   }
+  entry?.pendingPollResolve?.([]);
   clientRegistry.delete(clientId);
   clearScriptSourceIndex(clientId);
   console.error(`[Registry] Client unregistered: ${clientId}`);
