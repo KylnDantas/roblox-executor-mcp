@@ -8,6 +8,7 @@ interface RegisterBody {
   placeId?: number;
   jobId?: string;
   placeName?: string;
+  sessionId?: string;
 }
 
 export async function POST(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -19,6 +20,7 @@ export async function POST(req: IncomingMessage, res: ServerResponse): Promise<v
       placeId: info.placeId || 0,
       jobId: info.jobId || "",
       placeName: info.placeName || "Unknown",
+      sessionId: info.sessionId,
       transport: "http",
     });
     res.writeHead(200, { "Content-Type": "application/json" });

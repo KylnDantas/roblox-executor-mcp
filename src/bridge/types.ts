@@ -4,6 +4,7 @@ export type InstanceRole = "primary" | "secondary";
 
 export interface RobloxClient {
   clientId: string;
+  sessionId?: string;
   username: string;
   userId: number;
   placeId: number;

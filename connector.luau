@@ -1,69 +1,63 @@
+--// Variables \\--
+if getgenv().MCP_Loaded == true then
+    return
+end
+
+getgenv().MCP_Loaded = true
+
+local BridgeURL = getgenv().BridgeURL or getgenv().bridgeurl or ... or "localhost:16384"
+getgenv().BridgeURL = BridgeURL
+getgenv().bridgeurl = BridgeURL
+
 --// Wait for game to load \\--
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
---// Variables \\--
-local BridgeURL = getgenv().BridgeURL or ... or "localhost:16384"
+--// Services \\--
+local cloneref = cloneref or function(x) return x end
+
+local RobloxReplicatedStorage: RobloxReplicatedStorage = cloneref(game:GetService("RobloxReplicatedStorage"))
+local VirtualInputManager: VirtualInputManager = cloneref(Instance.new("VirtualInputManager"))
+local MarketplaceService: MarketplaceService = cloneref(game:GetService("MarketplaceService"))
+local CoreGui: CoreGui = cloneref(game:GetService("CoreGui"))
+local CorePackages: CorePackages = cloneref(game:GetService("CorePackages"))
+local ScriptContext: ScriptContext = cloneref(game:GetService("ScriptContext"))
+local HttpService: HttpService = cloneref(game:GetService("HttpService"))
+local LogService: LogService = cloneref(game:GetService("LogService"))
+local Players: Players = cloneref(game:GetService("Players"))
 
 --// Libraries \\--
 
--- Lua 5.1+ base64 v3.0 (c) 2009 by Alex Kloss <alexthkloss@web.de>
--- licensed under the terms of the LGPL2
-
--- character table string
-local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-
--- encoding
-function base64_encode(data)
-    return ((data:gsub('.', function(x) 
-        local r,b='',x:byte()
-        for i=8,1,-1 do r=r..(b%2^i-b%2^(i-1)>0 and '1' or '0') end
-        return r;
-    end)..'0000'):gsub('%d%d%d?%d?%d?%d?', function(x)
-        if (#x < 6) then return '' end
-        local c=0
-        for i=1,6 do c=c+(x:sub(i,i)=='1' and 2^(6-i) or 0) end
-        return b:sub(c+1,c+1)
-    end)..({ '', '==', '=' })[#data%3+1])
-end
-
---// Functions \\--
-local function CreateDecompileFunction(id, options)
-    local Endpoint = options.Endpoint
-    local EncodingCallback = options.EncodeBytecode or function(x) return x end
-    local FailedRequestCallback = options.FailedRequestCallback or function(httpResult) return `-- Failed to decompile, error:\n\n--[[\n{httpResult}\n--]]` end
-
-    return function(scriptPath: Script | ModuleScript | LocalScript): string
-        local okBytecode: boolean, bytecode: string = pcall(getscriptbytecode, scriptPath)
-
-        if not okBytecode then
-            return `-- Failed to get script bytecode, error:\n\n--[[\n{bytecode}\n--]]`
-        end
-
-        local okRequest: boolean, httpResult = pcall(request, {
-            Url = Endpoint,
-            Method = "POST",
-            Body = EncodingCallback(bytecode),
-            Headers = {
-                ["Content-Type"] = "text/plain"
-            },
-        })
-
-        if not okRequest then
-            return FailedRequestCallback(httpResult, scriptPath)
-        end
-
-        if httpResult.StatusCode ~= 200 then
-            return FailedRequestCallback(httpResult, scriptPath)
-        end
-
-        return `-- Decompiled with {id}\n{string.gsub(httpResult.Body, string.char(0x00CD), " ")}`
+local base64_encode
+do
+    -- Lua 5.1+ base64 v3.0 (c) 2009 by Alex Kloss <alexthkloss@web.de>
+    -- licensed under the terms of the LGPL2
+    
+    -- character table string
+    local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    
+    -- encoding
+    base64_encode = base64encode or function(data)
+        return ((data:gsub('.', function(x) 
+            local r,b='',x:byte()
+            for i=8,1,-1 do r=r..(b%2^i-b%2^(i-1)>0 and '1' or '0') end
+            return r;
+        end)..'0000'):gsub('%d%d%d?%d?%d?%d?', function(x)
+            if (#x < 6) then return '' end
+            local c=0
+            for i=1,6 do c=c+(x:sub(i,i)=='1' and 2^(6-i) or 0) end
+            return b:sub(c+1,c+1)
+        end)..({ '', '==', '=' })[#data%3+1])
     end
 end
 
+--// Functions \\--
+local getscriptbytecode = getscriptbytecode or function(_) error("Unable to get script bytecode.") end
+local GetScriptHash = type(getscripthash) == "function" and getscripthash or nil
+local BuiltInDecompile = type(decompile) == "function" and decompile or nil
+
 local LuaEncode = loadstring(game:HttpGet("https://raw.githubusercontent.com/chadhyatt/LuaEncode/refs/heads/master/src/LuaEncode.lua"))()
-local cloneref = cloneref or function(x) return x end
 
 --// Bounded serialization: cap depth / entries / string length and render
 --// Instances as their path so structured tool responses can't flood the
@@ -132,62 +126,7 @@ local function StripDecompilerBanner(source)
     return (string.gsub(source, "^%s*%-%-[^\n]*[Dd]ecompiled[^\n]*\n", "", 1))
 end
 
-local KonstantDecompile = CreateDecompileFunction("Konstant", { Endpoint = "http://api.plusgiant5.com/konstant/decompile" })
-local MedalDecompile = CreateDecompileFunction("Medal", {
-    Endpoint = "https://medal.upio.dev/decompile",
-    EncodingCallback = base64_encode,
-    FailedRequestCallback = function(_, path)
-        return KonstantDecompile(path)
-    end
-})
-
-local LuaExpertLastCall = 0
-local LuaExpertDecompile = function(scriptPath: Script | ModuleScript | LocalScript): string
-    local okBytecode, bytecode = pcall(getscriptbytecode, scriptPath)
-    if not okBytecode then
-        return `-- Failed to get script bytecode, error:\n\n--[[\n{bytecode}\n--]]`
-    end
-
-    -- Rate limit: lua.expert requires ~120ms between requests
-    local elapsed = os.clock() - LuaExpertLastCall
-    if elapsed < 0.12 then
-        task.wait(0.12 - elapsed)
-    end
-
-    local okRequest, httpResult = pcall(request, {
-        Url = "https://api.lua.expert/decompile",
-        Method = "POST",
-        Headers = {
-            ["Content-Type"] = "application/json"
-        },
-        Body = game:GetService("HttpService"):JSONEncode({
-            script = base64_encode(bytecode)
-        }),
-    })
-
-    LuaExpertLastCall = os.clock()
-
-    if not okRequest or httpResult.StatusCode ~= 200 then
-        return MedalDecompile(scriptPath)
-    end
-
-    return `-- Decompiled with lua.expert\n{httpResult.Body}`
-end
-
-local decompile = decompile or LuaExpertDecompile
 local getnilinstances = getnilinstances or function() return {} end
-local getscriptbytecode = getscriptbytecode or function(x) error("Unable to get script bytecode.") end
-
---// Services \\--
-local RobloxReplicatedStorage = cloneref(game:GetService("RobloxReplicatedStorage"))
-local VirtualInputManager = cloneref(Instance.new("VirtualInputManager"))
-local MarketplaceService = cloneref(game:GetService("MarketplaceService"))
-local CoreGui = cloneref(game:GetService("CoreGui"))
-local CorePackages = cloneref(game:GetService("CorePackages"))
-local ScriptContext = cloneref(game:GetService("ScriptContext"))
-local HttpService = cloneref(game:GetService("HttpService"))
-local LogService = cloneref(game:GetService("LogService"))
-local Players = cloneref(game:GetService("Players"))
 
 --// Compatibility Check \\--
 local WebSocketAvailable = (
@@ -196,6 +135,34 @@ local WebSocketAvailable = (
 ) and (getgenv().DisableWebSocket ~= true)
 
 --// Registration Info \\--
+local function GenerateSessionGuid()
+    local success, guid = pcall(function()
+        return HttpService:GenerateGUID(false)
+    end)
+    if success and type(guid) == "string" and guid ~= "" then
+        return guid
+    end
+    return tostring(os.clock()) .. "-" .. tostring(math.random(1, 1000000000))
+end
+
+local function GetClientIdentityKey()
+    local player = Players.LocalPlayer
+    return table.concat({
+        tostring(game.PlaceId or 0),
+        tostring(game.JobId or ""),
+        tostring(player and player.UserId or 0),
+    }, ":")
+end
+
+local function GetStableClientSessionId()
+    local identityKey = GetClientIdentityKey()
+    if type(getgenv().MCP_ClientSessionId) ~= "string" or getgenv().MCP_ClientIdentityKey ~= identityKey then
+        getgenv().MCP_ClientSessionId = GenerateSessionGuid()
+        getgenv().MCP_ClientIdentityKey = identityKey
+    end
+    return getgenv().MCP_ClientSessionId
+end
+
 local function GetRegistrationInfo()
     local player = Players.LocalPlayer
     local placeName = "Unknown"
@@ -210,6 +177,7 @@ local function GetRegistrationInfo()
         placeId = game.PlaceId,
         jobId = game.JobId,
         placeName = placeName,
+        sessionId = GetStableClientSessionId(),
     }
 end
 
@@ -698,10 +666,15 @@ local UploadQueueThread = nil
 local UploadBatchMax = 8
 local UploadFlushInterval = 0.5
 local UploadMaxAttempts = 3
+local SourceCacheLookupBatchMax = 64
+local ScriptHashTimeoutSeconds = 2
 local BytecodeTimeoutSeconds = 3
-local DecompileTimeoutSeconds = 12
+local BuiltInDecompileTimeoutSeconds = 8
+local ServerDecompileTimeoutSeconds = 65
 local MarkScriptProcessed
 local ActiveBridge = nil
+local ScriptSourceCacheByHash = {}
+local ScriptHashByDebugId = {}
 
 local function IsScriptMappingTransportReady(clientId)
     return (
@@ -813,29 +786,257 @@ local function RunWithTimeout(timeoutSeconds, callback)
     return true, result
 end
 
-local function DecompileScriptSource(script)
+local function RememberScriptSourceForHash(scriptHash, source)
+    if type(scriptHash) ~= "string" or scriptHash == "" then return false end
+    if type(source) ~= "string" or source == "" then return false end
+
+    ScriptSourceCacheByHash[scriptHash] = source
+    return true
+end
+
+local function ReadScriptHash(script)
+    if type(GetScriptHash) ~= "function" then return nil end
+
+    local success, result = RunWithTimeout(ScriptHashTimeoutSeconds, function()
+        return GetScriptHash(script)
+    end)
+
+    if not success or type(result) ~= "string" or result == "" then
+        return nil
+    end
+
+    return result
+end
+
+local function GetScriptHashForInstance(script)
+    local debugId = script:GetDebugId()
+    if ScriptHashByDebugId[debugId] ~= nil then
+        return ScriptHashByDebugId[debugId] or nil
+    end
+
+    local scriptHash = ReadScriptHash(script)
+    ScriptHashByDebugId[debugId] = scriptHash or false
+    return scriptHash
+end
+
+local function FetchCachedScriptSourceBatch(clientId, hashesToFetch)
+    if #hashesToFetch == 0 then return end
+
+    local ok, response = pcall(request, {
+        Url = "http://" .. BridgeURL .. "/script-source-cache",
+        Method = "POST",
+        Headers = {
+            ["Content-Type"] = "application/json",
+            ["Accept"] = "application/json",
+        },
+        Body = HttpService:JSONEncode({
+            clientId = clientId,
+            hashes = hashesToFetch,
+        }),
+    })
+
+    if not ok or type(response) ~= "table" or response.StatusCode ~= 200 or type(response.Body) ~= "string" then
+        return
+    end
+
+    local decodedOk, decoded = pcall(function()
+        return HttpService:JSONDecode(response.Body)
+    end)
+    if not decodedOk or type(decoded) ~= "table" or type(decoded.sources) ~= "table" then
+        return
+    end
+
+    for _, item in ipairs(decoded.sources) do
+        if type(item) == "table" then
+            RememberScriptSourceForHash(item.scriptHash, item.source)
+        end
+    end
+end
+
+local function FetchCachedScriptSources(clientId, scriptHashes)
+    if type(request) ~= "function" then return end
+    if type(clientId) ~= "string" or clientId == "" then return end
+    if type(scriptHashes) ~= "table" then return end
+
+    local hashesToFetch = {}
+    local seen = {}
+    local function flush()
+        FetchCachedScriptSourceBatch(clientId, hashesToFetch)
+        table.clear(hashesToFetch)
+    end
+
+    for _, scriptHash in ipairs(scriptHashes) do
+        if type(scriptHash) == "string" and scriptHash ~= "" and not ScriptSourceCacheByHash[scriptHash] and not seen[scriptHash] then
+            seen[scriptHash] = true
+            table.insert(hashesToFetch, scriptHash)
+            if #hashesToFetch >= SourceCacheLookupBatchMax then
+                flush()
+            end
+        end
+    end
+
+    flush()
+end
+
+local function ReadScriptBytecode(script)
     local success, bytecode = RunWithTimeout(BytecodeTimeoutSeconds, function()
         return getscriptbytecode(script)
     end)
-    if not success then return nil, bytecode end
+    if not success or bytecode == nil then
+        return false, bytecode or "Failed to read script bytecode."
+    end
+    return true, bytecode
+end
 
-    for attempt = 1, 3 do
-        local success, decompOutput = RunWithTimeout(DecompileTimeoutSeconds, function()
-            return decompile(script)
-        end)
-        if not success then
-            if type(decompOutput) == "string" and string.find(decompOutput, "Timed out", 1, true) then
-                return nil, decompOutput
-            end
+local function TryBuiltInDecompile(script)
+    if type(BuiltInDecompile) ~= "function" then return nil end
 
-            task.wait(0.5)
-            continue
-        end
-
-        return StripDecompilerBanner(decompOutput)
+    local startedAt = os.clock()
+    local success, source = RunWithTimeout(BuiltInDecompileTimeoutSeconds, function()
+        return BuiltInDecompile(script)
+    end)
+    local latencyMs = math.floor((os.clock() - startedAt) * 1000)
+    if not success or type(source) ~= "string" or source == "" then
+        return nil
     end
 
-    return nil, "Failed to decompile script after 3 attempts."
+    return StripDecompilerBanner(source), latencyMs
+end
+
+local function RequestServerDecompile(bytecode, options)
+    if type(request) ~= "function" then
+        return nil, "request function is unavailable"
+    end
+
+    options = if type(options) == "table" then options else {}
+    local body = {
+        clientId = ScriptSourceUploadClientId,
+        bytecode = base64_encode(bytecode),
+        builtinAvailable = type(BuiltInDecompile) == "function",
+    }
+    if type(options.builtinSource) == "string" then
+        body.builtinSource = options.builtinSource
+    end
+    if type(options.builtinLatencyMs) == "number" then
+        body.builtinLatencyMs = options.builtinLatencyMs
+    end
+    if type(options.requestedProvider) == "string" then
+        body.requestedProvider = options.requestedProvider
+    end
+    if type(options.disabledProviders) == "table" then
+        body.disabledProviders = options.disabledProviders
+    end
+
+    local success, response = RunWithTimeout(ServerDecompileTimeoutSeconds, function()
+        return request({
+            Url = "http://" .. BridgeURL .. "/decompile",
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json",
+                ["Accept"] = "application/json",
+            },
+            Body = HttpService:JSONEncode(body),
+        })
+    end)
+    if not success then
+        return nil, tostring(response)
+    end
+
+    if type(response) ~= "table" or type(response.Body) ~= "string" then
+        return nil, "Decompile server returned no response body."
+    end
+
+    local decodedOk, decoded = pcall(function()
+        return HttpService:JSONDecode(response.Body)
+    end)
+    if not decodedOk or type(decoded) ~= "table" then
+        return nil, "Decompile server returned invalid JSON."
+    end
+
+    if decoded.ok == true and type(decoded.source) == "string" and decoded.source ~= "" then
+        return StripDecompilerBanner(decoded.source)
+    end
+    if decoded.needsBuiltin == true and decoded.providerId == "builtin" then
+        return nil, nil, true
+    end
+
+    if type(decoded.error) == "string" and decoded.error ~= "" then
+        return nil, decoded.error
+    end
+    if type(decoded.attempts) == "table" then
+        return nil, table.concat(decoded.attempts, "\n\n")
+    end
+
+    return nil, "Decompile server failed without a detailed error."
+end
+
+local function PrepareScriptForMapping(script, fetchCache)
+    local debugId = script:GetDebugId()
+    local scriptHash = GetScriptHashForInstance(script)
+    if fetchCache and scriptHash then
+        FetchCachedScriptSources(ScriptSourceUploadClientId, { scriptHash })
+    end
+
+    local cachedSource = scriptHash and ScriptSourceCacheByHash[scriptHash] or nil
+    if cachedSource then
+        return {
+            debugId = debugId,
+            scriptHash = scriptHash,
+            source = cachedSource,
+        }
+    end
+
+    local okBytecode, bytecodeOrError = ReadScriptBytecode(script)
+    if not okBytecode then
+        return nil, bytecodeOrError
+    end
+
+    return {
+        debugId = debugId,
+        scriptHash = scriptHash,
+        bytecode = bytecodeOrError,
+    }
+end
+
+local function DecompileScriptSource(script, prepared)
+    local prepareError
+    if not prepared then
+        prepared, prepareError = PrepareScriptForMapping(script, true)
+    end
+    if not prepared then
+        return nil, prepareError or "Failed to prepare script for decompile."
+    end
+
+    if type(prepared.source) == "string" and prepared.source ~= "" then
+        return prepared.source, nil, prepared.scriptHash
+    end
+    if type(prepared.bytecode) ~= "string" then
+        return nil, "Prepared script is missing bytecode.", prepared.scriptHash
+    end
+
+    local source, errorMessage, needsBuiltin = RequestServerDecompile(prepared.bytecode)
+    if needsBuiltin then
+        local builtinSource, builtinLatencyMs = TryBuiltInDecompile(script)
+        if builtinSource then
+            source, errorMessage = RequestServerDecompile(prepared.bytecode, {
+                requestedProvider = "builtin",
+                builtinSource = builtinSource,
+                builtinLatencyMs = builtinLatencyMs,
+            })
+        else
+            source, errorMessage = RequestServerDecompile(prepared.bytecode, {
+                disabledProviders = { "builtin" },
+            })
+        end
+    end
+    if not source then
+        return nil, errorMessage, prepared.scriptHash
+    end
+
+    if prepared.scriptHash then
+        RememberScriptSourceForHash(prepared.scriptHash, source)
+    end
+    return source, nil, prepared.scriptHash
 end
 
 MarkScriptProcessed = function(debugId, uploaded)
@@ -853,12 +1054,12 @@ MarkScriptProcessed = function(debugId, uploaded)
     end
 end
 
-local function MapScriptSource(script)
+local function MapScriptSource(script, prepared)
     local debugId = script:GetDebugId()
     if MappedScriptIds[debugId] then return end
     if not IsScriptMappingTransportReady(ScriptSourceUploadClientId) then return end
 
-    local source = DecompileScriptSource(script)
+    local source, _, scriptHash = DecompileScriptSource(script, prepared)
     if not source then
         MarkScriptProcessed(debugId, false)
         return
@@ -875,6 +1076,7 @@ local function MapScriptSource(script)
         debugId = debugId,
         path = script:GetFullName(),
         source = source,
+        scriptHash = scriptHash,
         attempts = 0,
     })
 end
@@ -916,7 +1118,7 @@ local function GetScriptByDebugId(debugId)
     return nil
 end
 
-local function ShouldMapScript(script)        
+local function IsCandidateScriptForMapping(script)
     local IsServerScript = (
         script:IsA("Script") and (
             script.RunContext == Enum.RunContext.Server or
@@ -940,23 +1142,25 @@ local function ShouldMapScript(script)
     local IsAlreadyQueued = QueuedScriptIds[debugId]
     if IsAlreadyQueued then return false end
 
-    local Success, Bytecode = pcall(getscriptbytecode, script)
-    if not Success or Bytecode == nil then return false end
-
     return true
 end
 
-local function QueueScriptForMapping(script)
+local function QueueScriptForMapping(script, prepared)
     if not IsScriptMappingTransportReady(ScriptSourceUploadClientId) then return end
 
     local debugId = script:GetDebugId()
     if MappedScriptIds[debugId] or QueuedScriptIds[debugId] then return end
 
+    if not prepared then
+        prepared = PrepareScriptForMapping(script, true)
+    end
+    if not prepared then return end
+
     QueuedScriptIds[debugId] = true
     SourcesToMap += 1
     ScriptMappingFinished = false
     PublishScriptMappingStatus(false)
-    MappedSourceLimiter:QueueOperation(script)
+    MappedSourceLimiter:QueueOperation(script, prepared)
 end
 
 local function StartScriptMapping(clientId)
@@ -971,7 +1175,7 @@ local function StartScriptMapping(clientId)
             return
         end
 
-        if not ShouldMapScript(script) then return end
+        if not IsCandidateScriptForMapping(script) then return end
         QueueScriptForMapping(script)
     end)
 
@@ -984,22 +1188,42 @@ local function StartScriptMapping(clientId)
     task.spawn(function()
         if not IsScriptMappingTransportReady(clientId) then return end
 
-        local ValidScripts = {}
+        local CandidateScripts = {}
         for _, category in CategoriesToMap do
             for _, script in category do
                 if not script:IsA("LuaSourceContainer") then continue end
-                if not ShouldMapScript(script) then continue end
+                if not IsCandidateScriptForMapping(script) then continue end
 
+                table.insert(CandidateScripts, script)
+            end
+        end
+
+        local hashesToFetch = {}
+        for _, script in ipairs(CandidateScripts) do
+            local scriptHash = GetScriptHashForInstance(script)
+            if scriptHash then
+                table.insert(hashesToFetch, scriptHash)
+            end
+        end
+        FetchCachedScriptSources(clientId, hashesToFetch)
+
+        local ValidScripts = {}
+        for _, script in ipairs(CandidateScripts) do
+            local prepared = PrepareScriptForMapping(script, false)
+            if prepared then
                 QueuedScriptIds[script:GetDebugId()] = true
-                table.insert(ValidScripts, script)
+                table.insert(ValidScripts, {
+                    script = script,
+                    prepared = prepared,
+                })
             end
         end
 
         SourcesToMap += #ValidScripts
         PublishScriptMappingStatus(false)
 
-        for idx, scriptObject in ValidScripts do
-            task.defer(MappedSourceLimiter.QueueOperation, MappedSourceLimiter, scriptObject)
+        for idx, item in ValidScripts do
+            task.defer(MappedSourceLimiter.QueueOperation, MappedSourceLimiter, item.script, item.prepared)
             if idx % 250 == 0 then task.wait(0.1) end
         end
 
@@ -1018,6 +1242,7 @@ local function ResetScriptMappingState(clientId)
     HasStartedMapping = false
     ScriptMappingFinished = false
     ScriptSourceUploadClientId = clientId
+    ScriptHashByDebugId = {}
 
     if ScriptDescendantAddedConnection then
         ScriptDescendantAddedConnection:Disconnect()
@@ -1179,7 +1404,8 @@ while true do
             assert(not (scriptInstance:IsA("Script") and scriptInstance.RunContext == Enum.RunContext.Server), "Script instance is a Server Script.")
         end
 
-        source = DecompileScriptSource(scriptInstance)
+        local scriptHash
+        source, _, scriptHash = DecompileScriptSource(scriptInstance)
         assert(source, "Failed to decompile script.")
 
         local debugId = scriptInstance:GetDebugId()
@@ -1189,6 +1415,7 @@ while true do
                     debugId = debugId,
                     path = scriptInstance:GetFullName(),
                     source = source,
+                    scriptHash = scriptHash,
                 }
             }, ScriptMappingFinished)
 

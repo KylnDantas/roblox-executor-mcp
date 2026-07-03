@@ -14,6 +14,7 @@ interface RegisterMessage {
   placeId?: number;
   jobId?: string;
   placeName?: string;
+  sessionId?: string;
 }
 
 export function WS(ws: WebSocket): void {
@@ -31,6 +32,7 @@ export function WS(ws: WebSocket): void {
           placeId: info.placeId || 0,
           jobId: info.jobId || "",
           placeName: info.placeName || "Unknown",
+          sessionId: info.sessionId,
           transport: "ws",
           ws,
         });

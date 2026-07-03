@@ -293,7 +293,7 @@
                             </div>
                         </div>
 
-                        <div class="sidebar-section">
+                        <div class="sidebar-section" id="semanticIndexPanel">
                             <h3 class="sidebar-section-title">Semantic Indexing</h3>
                             <div class="github-progress">
                                 <div class="github-progress-segment" id="indexProgressFill" style="width: 0%; background: var(--green);"></div>
@@ -337,8 +337,26 @@
 
             <!-- ─── Settings view (home mode) ───────────────────── -->
             <div class="view" id="viewSettings" style="display:none">
-                <div class="settings-header"><h2 class="settings-title">Settings</h2><p class="settings-sub">Configure semantic search embedding provider</p></div>
+                <div class="settings-header"><h2 class="settings-title">Settings</h2><p class="settings-sub">Configure semantic search and decompiler fallbacks</p></div>
                 <div class="settings-card">
+                    <div class="settings-card-body">
+                        <div class="settings-card-heading-row">
+                            <div>
+                                <div class="settings-card-title">Semantic Search</div>
+                                <div class="settings-card-desc">Enable natural language script search and embedding indexing.</div>
+                            </div>
+                            <label class="settings-toggle-row settings-toggle-row--compact">
+                                <span>Enabled</span>
+                                <div class="toggle-switch">
+                                    <input type="checkbox" id="settingsSemanticEnabled" checked>
+                                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="settings-card-footer"><span class="settings-card-footer-hint">When disabled, semantic indexing and provider controls are hidden.</span><button class="settings-save-btn" id="saveSemanticEnabledBtn">Save</button></div>
+                </div>
+                <div class="settings-card" data-semantic-settings-panel>
                     <div class="settings-card-body">
                         <div class="settings-card-title">Embedding Provider</div>
                         <div class="settings-card-desc">Choose between OpenAI or Ollama for generating script embeddings.</div>
@@ -349,7 +367,7 @@
                     </div>
                     <div class="settings-card-footer"><span class="settings-card-footer-hint">Changing provider clears all cached indexes.</span><button class="settings-save-btn" id="saveProviderBtn">Save</button></div>
                 </div>
-                <div class="settings-card" id="settingsOpenai">
+                <div class="settings-card" id="settingsOpenai" data-semantic-settings-panel>
                     <div class="settings-card-body">
                         <div class="settings-card-title">OpenAI Configuration</div>
                         <div class="settings-card-desc">API key, compatible API base URL, and model for embeddings.</div>
@@ -359,7 +377,7 @@
                     </div>
                     <div class="settings-card-footer"><span class="settings-card-footer-hint">Stored locally in your home directory at .roblox-mcp/semantic-search.json</span><button class="settings-save-btn" id="saveOpenaiBtn">Save</button></div>
                 </div>
-                <div class="settings-card" id="settingsOllama" style="display:none">
+                <div class="settings-card" id="settingsOllama" style="display:none" data-semantic-settings-panel>
                     <div class="settings-card-body">
                         <div class="settings-card-title">Ollama Configuration</div>
                         <div class="settings-card-desc">Base URL and model for local Ollama embeddings.</div>
@@ -368,7 +386,7 @@
                     </div>
                     <div class="settings-card-footer"><span class="settings-card-footer-hint">Ensure Ollama is running locally.</span><button class="settings-save-btn" id="saveOllamaBtn">Save</button></div>
                 </div>
-                <div class="settings-card">
+                <div class="settings-card" data-semantic-settings-panel>
                     <div class="settings-card-body">
                         <div class="settings-card-title">Embedding Cache</div>
                         <div class="settings-card-desc">Reuse script embeddings after server restarts or Roblox reconnects.</div>
@@ -389,6 +407,27 @@
                     </div>
                 </div>
                 <div class="settings-card">
+                    <div class="settings-card-body">
+                        <div class="settings-card-heading-row">
+                            <div>
+                                <div class="settings-card-title">Decompiler fallbacks</div>
+                                <div class="settings-card-desc">Try providers in order. Drag to choose fallbacks; network and local providers only run when earlier entries fail.</div>
+                            </div>
+                            <div class="settings-card-heading-actions">
+                                <div class="settings-decompiler-add-wrap">
+                                    <button class="settings-add-provider-btn" id="settingsAddDecompilerBtn" type="button">+ Add provider</button>
+                                    <div class="settings-add-provider-menu" id="settingsAddDecompilerMenu"></div>
+                                </div>
+                                <button class="decompiler-card-settings-btn" id="settingsDecompilerRuntimeBtn" type="button" title="Decompiler behavior" aria-label="Decompiler behavior">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.1 4.3l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06A2 2 0 1 1 19.7 7.1l-.06.06A1.65 1.65 0 0 0 19.4 9c.26.6.85 1 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="settings-decompiler-board" id="settingsDecompilerList"></div>
+                    </div>
+                    <div class="settings-card-footer"><span class="settings-card-footer-hint">Stored locally in your home directory at .roblox-mcp/decompiler-settings.json</span><button class="settings-save-btn" id="saveDecompilerBtn">Save</button></div>
+                </div>
+                <div class="settings-card" data-semantic-settings-panel>
                     <div class="settings-card-body">
                         <div class="settings-card-title">Test Connection</div>
                         <div class="settings-card-desc">Verify that the current embedding provider is reachable and configured correctly.</div>
@@ -453,7 +492,7 @@
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
                                 <span>Script Grep</span>
                             </div>
-                            <div class="tools-list-item" data-tool="semantic-search">
+                            <div class="tools-list-item" data-tool="semantic-search" id="semanticSearchToolItem">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
                                 <span>Semantic Search</span>
                             </div>
@@ -518,6 +557,100 @@
                 </button>
             </div>
             <div class="add-client-body" id="addClientBody"></div>
+        </div>
+    </div>
+
+    <!-- Decompiler Provider Settings Modal -->
+    <div class="modal-overlay" id="decompilerProviderModal">
+        <div class="modal-dialog decompiler-provider-modal">
+            <div class="modal-header decompiler-provider-modal-header">
+                <div>
+                    <div class="modal-title" id="decompilerProviderModalTitle">Provider settings</div>
+                    <div class="modal-desc" id="decompilerProviderModalDesc">Configure decompiler options.</div>
+                </div>
+                <button class="modal-icon-btn" id="decompilerProviderCloseBtn" type="button" title="Close">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </button>
+            </div>
+            <div class="decompiler-provider-body" id="decompilerProviderBody"></div>
+        </div>
+    </div>
+
+    <!-- Decompiler Runtime Settings Modal -->
+    <div class="modal-overlay" id="decompilerRuntimeModal">
+        <div class="modal-dialog decompiler-runtime-modal">
+            <div class="modal-header decompiler-provider-modal-header">
+                <div>
+                    <div class="modal-title">Decompiler behavior</div>
+                    <div class="modal-desc">Fallback, cooldown, and slow-provider behavior.</div>
+                </div>
+                <button class="modal-icon-btn" id="decompilerRuntimeCloseBtn" type="button" title="Close">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </button>
+            </div>
+            <div class="decompiler-runtime-body" id="decompilerRuntimeBody">
+                <div class="decompiler-runtime-toggle-grid">
+                    <label class="settings-toggle-row decompiler-runtime-toggle-row">
+                        <span>Adaptive fallback</span>
+                        <div class="toggle-switch">
+                            <input type="checkbox" id="decompilerAdaptiveFallback">
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </div>
+                    </label>
+                    <label class="settings-toggle-row decompiler-runtime-toggle-row">
+                        <span>Load balance slow providers</span>
+                        <div class="toggle-switch">
+                            <input type="checkbox" id="decompilerLoadBalanceSlowProviders">
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </div>
+                    </label>
+                </div>
+                <button class="decompiler-runtime-advanced-toggle" id="decompilerRuntimeAdvancedToggle" type="button" aria-expanded="false">
+                    <span>Advanced</span>
+                    <span id="decompilerRuntimeAdvancedChevron">v</span>
+                </button>
+                <div class="decompiler-runtime-slider-list" id="decompilerRuntimeAdvancedFields" hidden>
+                    <div class="decompiler-runtime-slider">
+                        <div class="decompiler-runtime-slider-head">
+                            <label for="decompilerOverallTimeout">Overall timeout</label>
+                            <span id="decompilerOverallTimeoutValue">12s</span>
+                        </div>
+                        <input type="range" id="decompilerOverallTimeout" min="3" max="60" step="1" data-runtime-output="decompilerOverallTimeoutValue" data-runtime-format="seconds">
+                    </div>
+                    <div class="decompiler-runtime-slider">
+                        <div class="decompiler-runtime-slider-head">
+                            <label for="decompilerSlowAfter">Mark slow after</label>
+                            <span id="decompilerSlowAfterValue">6s</span>
+                        </div>
+                        <input type="range" id="decompilerSlowAfter" min="0.5" max="60" step="0.5" data-runtime-output="decompilerSlowAfterValue" data-runtime-format="seconds">
+                    </div>
+                    <div class="decompiler-runtime-slider">
+                        <div class="decompiler-runtime-slider-head">
+                            <label for="decompilerCooldown">Cooldown duration</label>
+                            <span id="decompilerCooldownValue">60s</span>
+                        </div>
+                        <input type="range" id="decompilerCooldown" min="5" max="600" step="5" data-runtime-output="decompilerCooldownValue" data-runtime-format="seconds">
+                    </div>
+                    <div class="decompiler-runtime-slider">
+                        <div class="decompiler-runtime-slider-head">
+                            <label for="decompilerSlowLimit">Slow hits before cooldown</label>
+                            <span id="decompilerSlowLimitValue">3</span>
+                        </div>
+                        <input type="range" id="decompilerSlowLimit" min="1" max="20" step="1" data-runtime-output="decompilerSlowLimitValue" data-runtime-format="count">
+                    </div>
+                    <div class="decompiler-runtime-slider">
+                        <div class="decompiler-runtime-slider-head">
+                            <label for="decompilerTimeoutLimit">Timeouts before cooldown</label>
+                            <span id="decompilerTimeoutLimitValue">2</span>
+                        </div>
+                        <input type="range" id="decompilerTimeoutLimit" min="1" max="20" step="1" data-runtime-output="decompilerTimeoutLimitValue" data-runtime-format="count">
+                    </div>
+                </div>
+                <div class="decompiler-modal-footer">
+                    <button class="modal-btn modal-btn--cancel" type="button" id="decompilerRuntimeCancelBtn">Cancel</button>
+                    <button class="modal-btn modal-btn--primary" type="button" id="decompilerRuntimeSaveBtn">Save</button>
+                </div>
+            </div>
         </div>
     </div>
 

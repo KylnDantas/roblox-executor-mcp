@@ -5,6 +5,7 @@ export interface StoredScriptSource {
   debugId: string;
   path: string;
   source: string;
+  scriptHash?: string;
   sourceHash: string;
   updatedAt: number;
 }
@@ -46,13 +47,30 @@ export interface UpsertScriptSourcesInput {
     debugId?: unknown;
     path?: unknown;
     source?: unknown;
+    scriptHash?: unknown;
   }[];
+}
+
+export interface CachedScriptSourceByHash {
+  scriptHash: string;
+  debugId: string;
+  path: string;
+  source: string;
+  sourceHash: string;
+  updatedAt: number;
 }
 
 const storesByClientId: Map<string, ClientScriptSourceStore> = new Map();
 
 function hashSource(source: string): string {
   return crypto.createHash("sha256").update(source).digest("hex");
+}
+
+function normalizeScriptHash(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 512) return undefined;
+  return trimmed;
 }
 
 function getOrCreateStore(identity: ScriptSourceStoreIdentity): ClientScriptSourceStore {
@@ -106,11 +124,13 @@ export function upsertScriptSources(
 
     const existing = store.scripts.get(script.debugId);
     const sourceHash = hashSource(script.source);
+    const scriptHash = normalizeScriptHash(script.scriptHash);
 
     if (existing && existing.sourceHash === sourceHash) {
       store.scripts.set(script.debugId, {
         ...existing,
         path: script.path,
+        scriptHash: scriptHash ?? existing.scriptHash,
       });
       continue;
     }
@@ -119,12 +139,48 @@ export function upsertScriptSources(
       debugId: script.debugId,
       path: script.path,
       source: script.source,
+      scriptHash,
       sourceHash,
       updatedAt: Date.now(),
     });
   }
 
   return getScriptSourceIndex(identity);
+}
+
+export function getCachedScriptSourcesByScriptHash(
+  identity: ScriptSourceStoreIdentity,
+  scriptHashes: unknown[]
+): CachedScriptSourceByHash[] {
+  const store = getOrCreateStore(identity);
+  const wanted = new Set<string>();
+  for (const hash of scriptHashes) {
+    const normalized = normalizeScriptHash(hash);
+    if (normalized) wanted.add(normalized);
+  }
+
+  if (wanted.size === 0) return [];
+
+  const results: CachedScriptSourceByHash[] = [];
+  const matched = new Set<string>();
+  const scripts = [...store.scripts.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  for (const script of scripts) {
+    if (!script.scriptHash || !wanted.has(script.scriptHash) || matched.has(script.scriptHash)) {
+      continue;
+    }
+
+    matched.add(script.scriptHash);
+    results.push({
+      scriptHash: script.scriptHash,
+      debugId: script.debugId,
+      path: script.path,
+      source: script.source,
+      sourceHash: script.sourceHash,
+      updatedAt: script.updatedAt,
+    });
+  }
+
+  return results;
 }
 
 export function getScriptSourceIndex(identity: ScriptSourceStoreIdentity): ScriptSourceIndex {

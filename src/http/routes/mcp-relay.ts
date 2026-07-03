@@ -8,6 +8,7 @@ import {
 import {
   formatActiveClientListForTool,
   resolveTargetClient,
+  setActiveClientId,
 } from "../../bridge/handlers/shared/registry.js";
 
 interface RelayMessage {
@@ -31,6 +32,34 @@ export function WS(ws: WebSocket): void {
           JSON.stringify({
             id: message.id,
             output: formatActiveClientListForTool(),
+          })
+        );
+        return;
+      }
+
+      if (message.type === "set-active-client" && message.id) {
+        const requestedClientId =
+          typeof message.targetClientId === "string" ? message.targetClientId : "";
+        const target = resolveTargetClient(requestedClientId);
+        if (!target) {
+          ws.send(
+            JSON.stringify({
+              id: message.id,
+              output: undefined,
+              error: `Invalid or inactive client ID: ${requestedClientId}. Use list-clients to get active client IDs.`,
+            })
+          );
+          return;
+        }
+
+        setActiveClientId(target.clientId);
+        ws.send(
+          JSON.stringify({
+            id: message.id,
+            output:
+              `Active client set to ${target.clientId} ` +
+              `(${target.username} @ ${target.placeName}, ${target.transport}).`,
+            clientId: target.clientId,
           })
         );
         return;

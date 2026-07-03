@@ -11,6 +11,7 @@ import { readJsonBody } from "../../../body.js";
 
 function mergeSettings(settings: SemanticSettings, input: SemanticSettingsInput): SemanticSettings {
   return {
+    enabled: typeof input.enabled === "boolean" ? input.enabled : settings.enabled,
     provider: input.provider === "openai" || input.provider === "ollama" ? input.provider : settings.provider,
     openaiApiKey:
       typeof input.openaiApiKey === "string" && input.openaiApiKey.trim()

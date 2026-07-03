@@ -5,6 +5,7 @@ import path from "node:path";
 export type SemanticProvider = "openai" | "ollama";
 
 export interface SemanticSettings {
+  enabled: boolean;
   provider: SemanticProvider;
   openaiApiKey: string;
   openaiBaseUrl: string;
@@ -15,6 +16,7 @@ export interface SemanticSettings {
 }
 
 export interface PublicSemanticSettings {
+  enabled: boolean;
   provider: SemanticProvider;
   openaiApiKeySet: boolean;
   openaiApiKeyMasked: string;
@@ -26,6 +28,7 @@ export interface PublicSemanticSettings {
 }
 
 export type SemanticSettingsInput = Partial<{
+  enabled: unknown;
   provider: unknown;
   openaiApiKey: unknown;
   openaiBaseUrl: unknown;
@@ -39,6 +42,7 @@ export const SEMANTIC_CONFIG_DIR = path.join(os.homedir(), ".roblox-mcp");
 export const SEMANTIC_SETTINGS_PATH = path.join(SEMANTIC_CONFIG_DIR, "semantic-search.json");
 
 export const DEFAULT_SEMANTIC_SETTINGS: SemanticSettings = {
+  enabled: true,
   provider: "openai",
   openaiApiKey: "",
   openaiBaseUrl: "https://api.openai.com/v1",
@@ -98,6 +102,10 @@ export async function loadSemanticSettings(): Promise<SemanticSettings> {
     if (!isObject(parsed)) return { ...DEFAULT_SEMANTIC_SETTINGS };
 
     return {
+      enabled:
+        typeof parsed.enabled === "boolean"
+          ? parsed.enabled
+          : DEFAULT_SEMANTIC_SETTINGS.enabled,
       provider: normalizeProvider(parsed.provider, DEFAULT_SEMANTIC_SETTINGS.provider),
       openaiApiKey: normalizeString(parsed.openaiApiKey, DEFAULT_SEMANTIC_SETTINGS.openaiApiKey),
       openaiBaseUrl: normalizeOpenAIBaseUrl(
@@ -125,6 +133,7 @@ export async function loadSemanticSettings(): Promise<SemanticSettings> {
 export async function saveSemanticSettings(input: SemanticSettingsInput): Promise<SemanticSettings> {
   const existing = await loadSemanticSettings();
   const next: SemanticSettings = {
+    enabled: typeof input.enabled === "boolean" ? input.enabled : existing.enabled,
     provider: normalizeProvider(input.provider, existing.provider),
     openaiApiKey:
       typeof input.openaiApiKey === "string" ? input.openaiApiKey.trim() : existing.openaiApiKey,
@@ -150,6 +159,7 @@ export async function saveSemanticSettings(input: SemanticSettingsInput): Promis
 export function toPublicSemanticSettings(settings: SemanticSettings): PublicSemanticSettings {
   const key = settings.openaiApiKey;
   return {
+    enabled: settings.enabled,
     provider: settings.provider,
     openaiApiKeySet: key.length > 0,
     openaiApiKeyMasked: key ? `${key.slice(0, 3)}...${key.slice(-4)}` : "",
@@ -162,6 +172,8 @@ export function toPublicSemanticSettings(settings: SemanticSettings): PublicSema
 }
 
 export function validateSemanticSettings(settings: SemanticSettings): string | null {
+  if (!settings.enabled) return "Semantic search is disabled.";
+
   if (settings.provider === "openai") {
     if (!settings.openaiApiKey) return "OpenAI API key is not configured.";
     if (!settings.openaiBaseUrl) return "OpenAI-compatible base URL is not configured.";

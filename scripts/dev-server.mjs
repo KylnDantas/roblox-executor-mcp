@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -118,6 +119,7 @@ const mockClients = [
 ];
 
 let mockSettings = {
+  enabled: true,
   provider: "openai",
   openaiBaseUrl: "https://api.openai.com/v1",
   openaiModel: "text-embedding-3-small",
@@ -126,6 +128,155 @@ let mockSettings = {
   ollamaModel: "nomic-embed-text",
   saveEmbeddingsToDisk: true,
 };
+
+let mockOracleApiKey = "";
+const MOCK_SHINY_HOSTED_ENDPOINT = "https://medal.upio.dev/decompile";
+const MOCK_SHINY_LOCAL_ENDPOINT = "http://localhost:3000/luau/decompile";
+const MOCK_PROVIDER_TIMEOUTS_MS = {
+  builtin: 8000,
+  luaexpert: 10000,
+  shiny: 6000,
+  oracle: 15000,
+  konstant: 10000,
+  fission: 6000,
+};
+const MOCK_DECOMPILER_RUNTIME = {
+  adaptiveFallback: true,
+  loadBalanceSlowProviders: true,
+  overallTimeoutMs: 12000,
+  slowAfterMs: 6000,
+  cooldownMs: 60000,
+  slowSuccessLimit: 3,
+  timeoutLimit: 2,
+  providerTimeoutsMs: MOCK_PROVIDER_TIMEOUTS_MS,
+};
+let mockDecompilerSettings = {
+  providerOrder: ["builtin", "luaexpert", "shiny", "oracle", "konstant", "fission"],
+  providers: {
+    builtin: {
+      enabled: true,
+      endpoint: "",
+      version: null,
+      options: {},
+      apiKeySet: false,
+      apiKeyMasked: "",
+    },
+    luaexpert: {
+      enabled: true,
+      endpoint: "https://api.lua.expert/decompile",
+      version: null,
+      options: {},
+      apiKeySet: false,
+      apiKeyMasked: "",
+    },
+    shiny: {
+      enabled: true,
+      endpoint: MOCK_SHINY_HOSTED_ENDPOINT,
+      version: null,
+      options: { mode: "hosted" },
+      apiKeySet: false,
+      apiKeyMasked: "",
+    },
+    oracle: {
+      enabled: false,
+      endpoint: "https://oracle.mshq.dev/decompile",
+      version: null,
+      options: {},
+      apiKeySet: false,
+      apiKeyMasked: "",
+    },
+    konstant: {
+      enabled: true,
+      endpoint: "http://api.plusgiant5.com/konstant/decompile",
+      version: null,
+      options: {},
+      apiKeySet: false,
+      apiKeyMasked: "",
+    },
+    fission: {
+      enabled: false,
+      endpoint: "http://localhost:3001/luau/decompile",
+      version: null,
+      options: {},
+      apiKeySet: false,
+      apiKeyMasked: "",
+    },
+  },
+  providerInfo: [
+    { id: "builtin", label: "Built-in", local: true, requiresApiKey: false },
+    { id: "luaexpert", label: "lua.expert", local: false, requiresApiKey: false },
+    { id: "shiny", label: "Shiny", local: false, requiresApiKey: false },
+    { id: "oracle", label: "Oracle", local: false, requiresApiKey: true },
+    { id: "konstant", label: "Konstant", local: false, requiresApiKey: false },
+    { id: "fission", label: "Fission", local: true, requiresApiKey: false },
+  ],
+  runtime: MOCK_DECOMPILER_RUNTIME,
+};
+let mockDecompilerInstalls = {
+  shiny: false,
+  fission: false,
+};
+
+function cloneMockDecompilerSettings() {
+  return JSON.parse(JSON.stringify(mockDecompilerSettings));
+}
+
+function mockRuntimeNumber(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
+}
+
+function normalizeMockDecompilerRuntime(value, fallback = MOCK_DECOMPILER_RUNTIME) {
+  const input = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const inputTimeouts =
+    input.providerTimeoutsMs && typeof input.providerTimeoutsMs === "object" && !Array.isArray(input.providerTimeoutsMs)
+      ? input.providerTimeoutsMs
+      : {};
+  const fallbackTimeouts = fallback.providerTimeoutsMs || MOCK_PROVIDER_TIMEOUTS_MS;
+  const providerTimeoutsMs = {};
+
+  for (const id of Object.keys(MOCK_PROVIDER_TIMEOUTS_MS)) {
+    providerTimeoutsMs[id] = mockRuntimeNumber(
+      inputTimeouts[id],
+      fallbackTimeouts[id] ?? MOCK_PROVIDER_TIMEOUTS_MS[id],
+      500,
+      60000,
+    );
+  }
+
+  return {
+    adaptiveFallback:
+      typeof input.adaptiveFallback === "boolean" ? input.adaptiveFallback : fallback.adaptiveFallback,
+    loadBalanceSlowProviders:
+      typeof input.loadBalanceSlowProviders === "boolean"
+        ? input.loadBalanceSlowProviders
+        : fallback.loadBalanceSlowProviders,
+    overallTimeoutMs: mockRuntimeNumber(input.overallTimeoutMs, fallback.overallTimeoutMs, 3000, 60000),
+    slowAfterMs: mockRuntimeNumber(input.slowAfterMs, fallback.slowAfterMs, 500, 60000),
+    cooldownMs: mockRuntimeNumber(input.cooldownMs, fallback.cooldownMs, 5000, 600000),
+    slowSuccessLimit: mockRuntimeNumber(input.slowSuccessLimit, fallback.slowSuccessLimit, 1, 20),
+    timeoutLimit: mockRuntimeNumber(input.timeoutLimit, fallback.timeoutLimit, 1, 20),
+    providerTimeoutsMs,
+  };
+}
+
+function mockDecompilerProviderIssue(id, provider) {
+  if (!provider || provider.enabled !== true) return null;
+  if (id === "oracle" && !provider.apiKeySet) {
+    return "Oracle: Authorization required. Add an Oracle API key before this provider can run.";
+  }
+  if (id !== "builtin" && typeof provider.endpoint === "string" && provider.endpoint.trim() === "") {
+    return `${id}: Endpoint required. Open provider settings and add a URL.`;
+  }
+  return null;
+}
+
+function mockDecompilerIssues(settings) {
+  return settings.providerOrder
+    .map((id) => mockDecompilerProviderIssue(id, settings.providers[id]))
+    .filter(Boolean);
+}
 
 const mockLogs = [
   { timestamp: new Date(startedAt - 40_000).toISOString(), level: "info", message: "Mock dashboard server started." },
@@ -159,11 +310,13 @@ function connector(bridgeUrl) {
 
 function makeScript(debugId, scriptPath, hasEmbeddings) {
   const source = mockSources.get(debugId) || "";
+  const sourceHash = crypto.createHash("sha256").update(source).digest("hex");
   const lines = source.split("\n").length;
   const bytes = Buffer.byteLength(source, "utf8");
   return {
     debugId,
     path: scriptPath,
+    sourceHash,
     lines,
     bytes,
     hasEmbeddings,
@@ -290,7 +443,13 @@ async function handleApi(req, res, url) {
       connected: true,
       startedAt,
       relayClients: 3,
-      clients: mockClients,
+      clients: mockClients.map((client) => ({
+        ...client,
+        semanticIndex:
+          mockSettings.enabled === false
+            ? { embeddedChunks: 0, chunkCount: 0 }
+            : client.semanticIndex,
+      })),
     });
     return true;
   }
@@ -382,7 +541,14 @@ async function handleApi(req, res, url) {
       const source = String(body.source || "");
       mockSources.set(debugId, source);
       mockScripts = mockScripts.map((script) =>
-        script.debugId === debugId ? { ...script, lines: source.split("\n").length, bytes: Buffer.byteLength(source, "utf8") } : script,
+        script.debugId === debugId
+          ? {
+              ...script,
+              sourceHash: crypto.createHash("sha256").update(source).digest("hex"),
+              lines: source.split("\n").length,
+              bytes: Buffer.byteLength(source, "utf8"),
+            }
+          : script,
       );
       json(res, 200, {
         ok: true,
@@ -402,6 +568,25 @@ async function handleApi(req, res, url) {
       path: script.path,
       debugId: script.debugId,
       source: scriptSource(script.debugId),
+    });
+    return true;
+  }
+
+  if (pathname === "/script-source-cache") {
+    const body = await readJson(req);
+    const wanted = new Set(Array.isArray(body.hashes) ? body.hashes.map(String) : []);
+    json(res, 200, {
+      ok: true,
+      sources: mockScripts
+        .filter((script) => wanted.has(script.sourceHash))
+        .map((script) => ({
+          scriptHash: script.sourceHash,
+          sourceHash: script.sourceHash,
+          debugId: script.debugId,
+          path: script.path,
+          source: scriptSource(script.debugId),
+          updatedAt: Date.now(),
+        })),
     });
     return true;
   }
@@ -445,6 +630,159 @@ async function handleApi(req, res, url) {
     return true;
   }
 
+  if (pathname === "/api/decompiler-settings/connector") {
+    json(res, 200, {
+      providerOrder: mockDecompilerSettings.providerOrder,
+      runtime: mockDecompilerSettings.runtime,
+      providers: Object.fromEntries(
+        Object.entries(mockDecompilerSettings.providers).map(([id, provider]) => [
+          id,
+          {
+            enabled: provider.enabled,
+            endpoint: provider.endpoint,
+            apiKey: id === "oracle" ? mockOracleApiKey : "",
+            version: provider.version,
+            options: provider.options,
+          },
+        ]),
+      ),
+    });
+    return true;
+  }
+
+  if (pathname === "/api/decompiler-settings/setup") {
+    if (req.method === "GET") {
+      const provider = url.searchParams.get("provider") || "";
+      const installed = provider === "shiny" || provider === "fission" ? mockDecompilerInstalls[provider] === true : false;
+      const endpoint =
+        url.searchParams.get("endpoint") ||
+        (provider === "shiny"
+          ? MOCK_SHINY_LOCAL_ENDPOINT
+          : provider === "fission"
+            ? "http://localhost:3001/luau/decompile"
+            : "");
+      if (!endpoint || !mockDecompilerSettings.providers[provider]) {
+        json(res, 400, { error: "Unsupported decompiler provider setup." });
+        return true;
+      }
+      json(res, 200, {
+        ok: true,
+        provider,
+        installed,
+        binaryExists: installed,
+        serverRunning: installed,
+        endpoint,
+        repoPath: `/mock/decompilers/${provider}`,
+        binaryPath: installed ? `/mock/decompilers/${provider}/${provider === "shiny" ? "medal" : "Fission.Server"}` : null,
+        logPath: `/mock/decompilers/${provider}/${provider}.log`,
+        assetName: provider === "shiny" ? "medal-mock" : "fission-server-mock",
+        assetUrl: `https://example.invalid/${provider}/latest`,
+        installedAt: installed ? new Date(startedAt).toISOString() : null,
+        updatedAt: installed ? new Date().toISOString() : null,
+        error: null,
+      });
+      return true;
+    }
+    if (req.method !== "POST") {
+      json(res, 405, { error: "Method not allowed" });
+      return true;
+    }
+    const body = await readJson(req);
+    const provider = String(body.provider || "");
+    const requestedEndpoint = typeof body.endpoint === "string" ? body.endpoint.trim() : "";
+    const endpoint =
+      requestedEndpoint ||
+      (provider === "shiny"
+        ? MOCK_SHINY_LOCAL_ENDPOINT
+        : provider === "fission"
+          ? "http://localhost:3001/luau/decompile"
+          : "");
+    if (!endpoint || !mockDecompilerSettings.providers[provider]) {
+      json(res, 400, { error: "Unsupported decompiler provider setup." });
+      return true;
+    }
+    mockDecompilerSettings.providers[provider].endpoint = endpoint;
+    mockDecompilerSettings.providers[provider].enabled = true;
+    if (provider === "shiny") {
+      mockDecompilerSettings.providers.shiny.options = { ...mockDecompilerSettings.providers.shiny.options, mode: "local" };
+    }
+    mockDecompilerInstalls[provider] = true;
+    json(res, 200, {
+      ok: true,
+      provider,
+      endpoint,
+      repoPath: `/mock/decompilers/${provider}`,
+      binaryPath: `/mock/decompilers/${provider}/${provider === "shiny" ? "medal" : "Fission.Server"}`,
+      runCommand:
+        provider === "shiny"
+          ? `medal serve --port ${new URL(endpoint).port || "3000"}`
+          : `Fission.Server --port ${new URL(endpoint).port || "3001"}`,
+      logPath: `/mock/decompilers/${provider}/${provider}.log`,
+      started: true,
+      output: `Mock ${provider} setup completed. No release download was run.`,
+    });
+    return true;
+  }
+
+  if (pathname === "/api/decompiler-settings") {
+    if (req.method === "PUT") {
+      const body = await readJson(req);
+      const nextSettings = cloneMockDecompilerSettings();
+      let nextOracleApiKey = mockOracleApiKey;
+      if (Array.isArray(body.providerOrder)) {
+        nextSettings.providerOrder = [];
+        for (const rawId of body.providerOrder.map(String)) {
+          const id = rawId === "medal" ? "shiny" : rawId;
+          if (nextSettings.providers[id] && !nextSettings.providerOrder.includes(id)) {
+            nextSettings.providerOrder.push(id);
+          }
+        }
+        if (!nextSettings.providerOrder.includes("builtin")) {
+          nextSettings.providerOrder.unshift("builtin");
+        }
+      }
+      if (body.providers && typeof body.providers === "object") {
+        for (const [rawId, provider] of Object.entries(body.providers)) {
+          const id = rawId === "medal" ? "shiny" : rawId;
+          if (!nextSettings.providers[id] || !provider || typeof provider !== "object") continue;
+          const current = nextSettings.providers[id];
+          const options =
+            provider.options && typeof provider.options === "object" && !Array.isArray(provider.options)
+              ? provider.options
+              : current.options;
+          nextSettings.providers[id] = {
+            ...current,
+            enabled: typeof provider.enabled === "boolean" ? provider.enabled : current.enabled,
+            endpoint: typeof provider.endpoint === "string" ? provider.endpoint : current.endpoint,
+            version: provider.version == null ? null : Number(provider.version),
+            options: rawId === "medal" ? { ...options, mode: "hosted" } : options,
+          };
+          if (id === "oracle" && typeof provider.apiKey === "string") {
+            nextOracleApiKey = provider.apiKey;
+            nextSettings.providers.oracle.apiKeySet = nextOracleApiKey.length > 0;
+            nextSettings.providers.oracle.apiKeyMasked = nextOracleApiKey
+              ? `${nextOracleApiKey.slice(0, 3)}...${nextOracleApiKey.slice(-4)}`
+              : "";
+          }
+        }
+      }
+      if (body.runtime && typeof body.runtime === "object" && !Array.isArray(body.runtime)) {
+        nextSettings.runtime = normalizeMockDecompilerRuntime(body.runtime, nextSettings.runtime);
+      }
+      const issues = mockDecompilerIssues(nextSettings);
+      if (issues.length) {
+        json(res, 400, { error: `Fix decompiler provider issues before saving: ${issues.join(" ")}` });
+        return true;
+      }
+      mockDecompilerSettings = nextSettings;
+      mockOracleApiKey = nextOracleApiKey;
+      json(res, 200, mockDecompilerSettings);
+      return true;
+    }
+    json(res, 200, mockDecompilerSettings);
+    return true;
+  }
+
   if (pathname === "/api/semantic-settings") {
     if (req.method === "PUT") {
       mockSettings = { ...mockSettings, ...(await readJson(req)), openaiApiKeySet: mockSettings.openaiApiKeySet };
@@ -460,6 +798,12 @@ async function handleApi(req, res, url) {
   }
 
   if (pathname === "/api/semantic-settings/test") {
+    const body = req.method === "POST" ? await readJson(req) : {};
+    const enabled = typeof body.enabled === "boolean" ? body.enabled : mockSettings.enabled;
+    if (enabled === false) {
+      json(res, 400, { ok: false, error: "Semantic search is disabled." });
+      return true;
+    }
     json(res, 200, {
       ok: true,
       dimensions: 1536,

@@ -6,7 +6,10 @@ let clients = [];
 let toolCallCount = 0;
 let currentRelays = 0;
 let currentConnected = false;
+let semanticSearchEnabled = true;
 let settingsProvider = 'openai';
+let decompilerSettings = null;
+let decompilerRuntimeAdvancedOpen = false;
 
 let startTime = Date.now();
 
@@ -59,6 +62,135 @@ const scriptsCodeMenu = $('scriptsCodeMenu');
 const scriptsCodeSaveBtn = $('scriptsCodeSaveBtn');
 const scriptsCodeView = $('scriptsCodeView');
 const scriptsExportBtn = $('scriptsExportBtn');
+
+const SHINY_LOCAL_ENDPOINT = 'http://localhost:3000/luau/decompile';
+const SHINY_HOSTED_ENDPOINT = 'https://medal.upio.dev/decompile';
+const BRIDGE_HOST_ENDPOINT_TOKEN = '{{BridgeHost}}';
+const DEFAULT_DECOMPILER_RUNTIME = {
+    adaptiveFallback: true,
+    loadBalanceSlowProviders: true,
+    overallTimeoutMs: 12000,
+    slowAfterMs: 6000,
+    cooldownMs: 60000,
+    slowSuccessLimit: 3,
+    timeoutLimit: 2,
+    providerTimeoutsMs: {
+        builtin: 8000,
+        luaexpert: 10000,
+        shiny: 6000,
+        oracle: 15000,
+        konstant: 10000,
+        fission: 6000
+    }
+};
+
+const decompilerProviderUi = {
+    builtin: {
+        label: 'Built-in decompiler',
+        byline: 'Executor',
+        description: 'Executor-provided decompile() function.'
+    },
+    luaexpert: {
+        label: 'lua.expert',
+        byline: 'lua.expert',
+        description: 'Remote JSON decompiler.'
+    },
+    shiny: {
+        label: 'Shiny',
+        byline: 'local or hosted',
+        description: 'Use a local Shiny server or the hosted Medal Server endpoint.',
+        setupLabel: 'Download & setup Shiny',
+        setupDescription: 'Downloads the latest Shiny release for this computer and starts the local server.'
+    },
+    oracle: {
+        label: 'Oracle',
+        byline: 'API key required',
+        description: 'Paid API decompiler with configurable options.',
+        purchaseUrl: 'https://discord.gg/T3HVAbzgCa'
+    },
+    konstant: {
+        label: 'Konstant',
+        byline: 'plusgiant5',
+        description: 'Raw-bytecode endpoint.'
+    },
+    fission: {
+        label: 'Fission',
+        byline: 'Dottik',
+        description: 'Local Fission HTTP server.',
+        setupLabel: 'Download & setup Fission',
+        setupDescription: 'Downloads the latest Fission server release and starts the local endpoint.'
+    }
+};
+let decompilerDragId = null;
+let decompilerDragState = null;
+let decompilerModalProviderId = null;
+let decompilerAdvancedOpen = true;
+let decompilerSetupState = {};
+let decompilerHealthRefreshInFlight = false;
+
+function cloneDefaultDecompilerRuntime() {
+    return {
+        ...DEFAULT_DECOMPILER_RUNTIME,
+        providerTimeoutsMs: { ...DEFAULT_DECOMPILER_RUNTIME.providerTimeoutsMs }
+    };
+}
+
+function shinyMode(provider) {
+    const mode = provider?.options && typeof provider.options === 'object' ? provider.options.mode : null;
+    if (mode === 'local' || mode === 'hosted') return mode;
+    const endpoint = typeof provider?.endpoint === 'string' ? provider.endpoint : '';
+    return endpoint.includes('medal.upio.dev') ? 'hosted' : 'local';
+}
+
+function shinyEndpointForMode(mode) {
+    return mode === 'hosted' ? SHINY_HOSTED_ENDPOINT : SHINY_LOCAL_ENDPOINT;
+}
+
+function isLoopbackEndpointHost(hostname) {
+    const normalized = String(hostname || '').toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
+    return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1' || normalized === '0.0.0.0';
+}
+
+function endpointToBridgeHostDisplay(endpoint) {
+    if (typeof endpoint !== 'string' || !endpoint.trim()) return endpoint || '';
+    if (endpoint.includes(BRIDGE_HOST_ENDPOINT_TOKEN)) return endpoint;
+    try {
+        const url = new URL(endpoint);
+        if (!isLoopbackEndpointHost(url.hostname)) return endpoint;
+        const port = url.port ? ':' + url.port : '';
+        return url.protocol + '//' + BRIDGE_HOST_ENDPOINT_TOKEN + port + url.pathname + url.search + url.hash;
+    } catch {
+        return endpoint;
+    }
+}
+
+function endpointToMcpHostValue(endpoint) {
+    if (typeof endpoint !== 'string') return '';
+    return endpoint
+        .trim()
+        .replace(/^(https?:\/\/)\{\{BridgeHost\}\}(?=[:/?#]|$)/i, '$1localhost');
+}
+
+function endpointDisplayForProvider(id, provider, endpoint) {
+    if (id === 'shiny' && shinyMode(provider) === 'hosted') return endpoint || '';
+    if (id === 'fission' || id === 'shiny') return endpointToBridgeHostDisplay(endpoint);
+    return endpoint || '';
+}
+
+function fissionLocalEndpoint() {
+    return 'http://localhost:3001/luau/decompile';
+}
+
+function setShinyMode(provider, mode, preserveCustomEndpoint = false) {
+    provider.options = provider.options && typeof provider.options === 'object' && !Array.isArray(provider.options)
+        ? { ...provider.options }
+        : {};
+    provider.options.mode = mode;
+    const currentEndpoint = typeof provider.endpoint === 'string' ? provider.endpoint.trim() : '';
+    if (!preserveCustomEndpoint || !currentEndpoint) {
+        provider.endpoint = shinyEndpointForMode(mode);
+    }
+}
 
 function updateCodeOverflowHint() {
     if (!scriptsCodeView) return;
@@ -1028,6 +1160,15 @@ function updateOverview() {
     const oss = $('overviewScriptsSynced');
     if (oss) oss.textContent = mapped;
 
+    if (semanticSearchEnabled === false) {
+        const scv = $('scriptsChunkCount'); if (scv) scv.textContent = '0/0';
+        const ipv = $('scriptsIndexPerc'); if (ipv) ipv.textContent = '0%';
+        const ipf = $('indexProgressFill'); if (ipf) ipf.style.width = '0%';
+        if (semanticIndexStatus) semanticIndexStatus.textContent = 'Disabled';
+        if (semanticIndexBtn) semanticIndexBtn.disabled = true;
+        return;
+    }
+
     const semantic = c.semanticIndex || { embeddedChunks: 0, chunkCount: 0 };
     const embeddedChunks = Number(semantic.embeddedChunks) || 0;
     const chunkCount = Number(semantic.chunkCount) || 0;
@@ -1177,6 +1318,11 @@ const toolDefs = {
 let activeTool = null;
 
 function selectTool(toolKey) {
+    if (toolKey === 'semantic-search' && semanticSearchEnabled === false) {
+        showToast('Semantic search is disabled', 'error');
+        return;
+    }
+
     const def = toolDefs[toolKey];
     if (!def) return;
 
@@ -1310,6 +1456,11 @@ async function pollOverviewIndexProgress(jobId) {
 }
 
 async function triggerSemanticIndex() {
+    if (semanticSearchEnabled === false) {
+        if (semanticIndexStatus) semanticIndexStatus.textContent = 'Disabled';
+        showToast('Semantic search is disabled', 'error');
+        return;
+    }
     if (!selectedClientId || semanticIndexJobId) return;
     semanticIndexStatus.textContent = 'Starting...';
     semanticIndexBtn.disabled = true;
@@ -2575,25 +2726,493 @@ function showToast(message, type = 'info', duration = 3500) {
 }
 
 async function loadSettings() {
+    await Promise.allSettled([
+        loadSemanticSettings(),
+        loadDecompilerSettings()
+    ]);
+}
+
+function updateSemanticSearchVisibility() {
+    const enabled = semanticSearchEnabled !== false;
+    const semanticToggle = $('settingsSemanticEnabled');
+    if (semanticToggle) semanticToggle.checked = enabled;
+
+    document.querySelectorAll('[data-semantic-settings-panel]').forEach(panel => {
+        panel.style.display = enabled ? '' : 'none';
+    });
+
+    const semanticIndexPanel = $('semanticIndexPanel');
+    if (semanticIndexPanel) semanticIndexPanel.style.display = enabled ? '' : 'none';
+
+    const semanticToolItem = $('semanticSearchToolItem');
+    if (semanticToolItem) semanticToolItem.style.display = enabled ? '' : 'none';
+
+    if (!enabled) {
+        if (semanticIndexBtn) semanticIndexBtn.disabled = true;
+        if (semanticIndexStatus) semanticIndexStatus.textContent = 'Disabled';
+        if (activeTool === 'semantic-search') selectTool('script-grep');
+    }
+
+    updateProviderUI();
+}
+
+async function loadSemanticSettings() {
     try {
         const res = await fetch('/api/semantic-settings');
         const d = await res.json();
+        semanticSearchEnabled = d.enabled !== false;
         settingsProvider = d.provider || 'openai';
-        updateProviderUI();
         $('settingsOpenaiUrl').value = d.openaiBaseUrl || '';
         $('settingsOpenaiModel').value = d.openaiModel || '';
         $('settingsOpenaiKey').value = d.openaiApiKeySet ? '••••••••' : '';
         $('settingsOllamaUrl').value = d.ollamaBaseUrl || '';
         $('settingsOllamaModel').value = d.ollamaModel || '';
         $('settingsSaveEmbeddings').checked = d.saveEmbeddingsToDisk === true;
+        updateSemanticSearchVisibility();
     } catch(e) {}
+}
+
+function formatSettingsJson(value) {
+    const obj = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    return JSON.stringify(obj, null, 2);
+}
+
+async function loadDecompilerSettings() {
+    try {
+        const res = await fetch('/api/decompiler-settings');
+        if (!res.ok) throw new Error('Failed to load decompiler settings');
+        const data = await res.json();
+        decompilerSettings = data;
+        normalizeDecompilerState();
+        renderDecompilerSettings();
+    } catch(e) {
+        showToast('Failed to load decompiler settings', 'error');
+    }
+}
+
+async function refreshDecompilerHealth() {
+    if (dashboardMode !== 'home' || currentView !== 'settings') return;
+    if (!decompilerSettings || decompilerHealthRefreshInFlight) return;
+
+    decompilerHealthRefreshInFlight = true;
+    try {
+        const res = await fetch('/api/decompiler-settings', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        decompilerSettings.health = data.health || null;
+
+        document.querySelectorAll('.decompiler-provider-row').forEach(row => {
+            const id = row.dataset.providerId;
+            const copy = row.querySelector('.decompiler-provider-copy');
+            if (!id || !copy) return;
+
+            const nextHtml = decompilerHealthHtml(id);
+            const current = row.querySelector('.decompiler-provider-health');
+            if (current && nextHtml) {
+                current.outerHTML = nextHtml;
+            } else if (current) {
+                current.remove();
+            } else if (nextHtml) {
+                copy.insertAdjacentHTML('beforeend', nextHtml);
+            }
+        });
+    } catch(e) {
+        // Keep the settings page quiet during transient server reconnects.
+    } finally {
+        decompilerHealthRefreshInFlight = false;
+    }
+}
+
+function knownDecompilerIds() {
+    const ids = Object.keys(decompilerProviderUi);
+    if (decompilerSettings && decompilerSettings.providers) {
+        for (const id of Object.keys(decompilerSettings.providers)) {
+            if (!ids.includes(id)) ids.push(id);
+        }
+    }
+    return ids;
+}
+
+function providerUi(id) {
+    return decompilerProviderUi[id] || {
+        label: id,
+        byline: 'custom',
+        description: 'Custom decompiler provider.'
+    };
+}
+
+function ensureDecompilerProvider(id) {
+    if (id === 'medal') id = 'shiny';
+    if (!decompilerSettings) {
+        decompilerSettings = { providerOrder: [], providers: {}, providerInfo: [] };
+    }
+    if (!decompilerSettings.providers) decompilerSettings.providers = {};
+    if (!decompilerSettings.providers[id]) {
+        decompilerSettings.providers[id] = {
+            enabled: false,
+            endpoint: '',
+            version: null,
+            options: {},
+            apiKeySet: false,
+            apiKeyMasked: ''
+        };
+    }
+    if (id === 'shiny') {
+        const provider = decompilerSettings.providers[id];
+        if (!provider.endpoint) provider.endpoint = SHINY_HOSTED_ENDPOINT;
+        setShinyMode(provider, shinyMode(provider), true);
+    }
+    return decompilerSettings.providers[id];
+}
+
+function normalizeDecompilerState() {
+    if (!decompilerSettings) return;
+    if (!Array.isArray(decompilerSettings.providerOrder)) decompilerSettings.providerOrder = [];
+    if (!decompilerSettings.providers) decompilerSettings.providers = {};
+    decompilerSettings.runtime = normalizeDecompilerRuntime(decompilerSettings.runtime);
+    if (decompilerSettings.providers.medal) {
+        const medal = decompilerSettings.providers.medal;
+        const shiny = ensureDecompilerProvider('shiny');
+        const medalMode = {
+            ...medal,
+            endpoint: medal.endpoint || SHINY_HOSTED_ENDPOINT,
+            options: {
+                ...(medal.options && typeof medal.options === 'object' && !Array.isArray(medal.options) ? medal.options : {}),
+                mode: 'hosted'
+            }
+        };
+        if (medal.enabled === true || shiny.enabled !== true) {
+            decompilerSettings.providers.shiny = medalMode;
+        }
+        delete decompilerSettings.providers.medal;
+    }
+
+    const order = [];
+    for (const id of decompilerSettings.providerOrder) {
+        const normalizedId = id === 'medal' ? 'shiny' : id;
+        if (typeof normalizedId === 'string' && !order.includes(normalizedId)) order.push(normalizedId);
+    }
+    for (const id of knownDecompilerIds()) {
+        if (!order.includes(id)) order.push(id);
+    }
+    decompilerSettings.providerOrder = order;
+}
+
+function clampRuntimeNumber(value, fallback, min, max) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(max, Math.max(min, parsed));
+}
+
+function normalizeDecompilerRuntime(value) {
+    const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const defaults = cloneDefaultDecompilerRuntime();
+    const inputTimeouts = input.providerTimeoutsMs && typeof input.providerTimeoutsMs === 'object' && !Array.isArray(input.providerTimeoutsMs)
+        ? input.providerTimeoutsMs
+        : {};
+    const providerTimeoutsMs = {};
+    for (const id of Object.keys(defaults.providerTimeoutsMs)) {
+        providerTimeoutsMs[id] = Math.round(clampRuntimeNumber(inputTimeouts[id], defaults.providerTimeoutsMs[id], 500, 60000));
+    }
+    return {
+        adaptiveFallback: typeof input.adaptiveFallback === 'boolean' ? input.adaptiveFallback : defaults.adaptiveFallback,
+        loadBalanceSlowProviders: typeof input.loadBalanceSlowProviders === 'boolean' ? input.loadBalanceSlowProviders : defaults.loadBalanceSlowProviders,
+        overallTimeoutMs: Math.round(clampRuntimeNumber(input.overallTimeoutMs, defaults.overallTimeoutMs, 3000, 60000)),
+        slowAfterMs: Math.round(clampRuntimeNumber(input.slowAfterMs, defaults.slowAfterMs, 500, 60000)),
+        cooldownMs: Math.round(clampRuntimeNumber(input.cooldownMs, defaults.cooldownMs, 5000, 600000)),
+        slowSuccessLimit: Math.round(clampRuntimeNumber(input.slowSuccessLimit, defaults.slowSuccessLimit, 1, 20)),
+        timeoutLimit: Math.round(clampRuntimeNumber(input.timeoutLimit, defaults.timeoutLimit, 1, 20)),
+        providerTimeoutsMs
+    };
+}
+
+function formatRuntimeSliderValue(value, format) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return '';
+    if (format === 'seconds') {
+        return Number.isInteger(number) ? `${number}s` : `${number.toFixed(1)}s`;
+    }
+    return String(Math.round(number));
+}
+
+function updateRuntimeSliderValue(input) {
+    if (!input) return;
+    const outputId = input.dataset.runtimeOutput;
+    const output = outputId ? $(outputId) : null;
+    if (!output) return;
+    output.textContent = formatRuntimeSliderValue(input.value, input.dataset.runtimeFormat);
+}
+
+function setRuntimeSliderValue(id, value) {
+    const input = $(id);
+    if (!input) return;
+    input.value = String(value);
+    updateRuntimeSliderValue(input);
+}
+
+function renderDecompilerRuntimeAdvanced() {
+    const fields = $('decompilerRuntimeAdvancedFields');
+    const toggle = $('decompilerRuntimeAdvancedToggle');
+    const chevron = $('decompilerRuntimeAdvancedChevron');
+    if (fields) fields.hidden = !decompilerRuntimeAdvancedOpen;
+    if (toggle) toggle.setAttribute('aria-expanded', decompilerRuntimeAdvancedOpen ? 'true' : 'false');
+    if (chevron) chevron.textContent = decompilerRuntimeAdvancedOpen ? '^' : 'v';
+}
+
+function renderDecompilerRuntimeSettings() {
+    if (!decompilerSettings) return;
+    const runtime = normalizeDecompilerRuntime(decompilerSettings.runtime);
+    decompilerSettings.runtime = runtime;
+    const adaptive = $('decompilerAdaptiveFallback');
+    if (adaptive) adaptive.checked = runtime.adaptiveFallback !== false;
+    const loadBalance = $('decompilerLoadBalanceSlowProviders');
+    if (loadBalance) loadBalance.checked = runtime.loadBalanceSlowProviders !== false;
+    setRuntimeSliderValue('decompilerOverallTimeout', runtime.overallTimeoutMs / 1000);
+    setRuntimeSliderValue('decompilerSlowAfter', runtime.slowAfterMs / 1000);
+    setRuntimeSliderValue('decompilerCooldown', runtime.cooldownMs / 1000);
+    setRuntimeSliderValue('decompilerSlowLimit', runtime.slowSuccessLimit);
+    setRuntimeSliderValue('decompilerTimeoutLimit', runtime.timeoutLimit);
+    renderDecompilerRuntimeAdvanced();
+}
+
+function activeDecompilerOrder() {
+    normalizeDecompilerState();
+    return decompilerSettings.providerOrder.filter(id => {
+        const provider = ensureDecompilerProvider(id);
+        return provider.enabled === true;
+    });
+}
+
+function setActiveDecompilerOrder(activeOrder) {
+    const active = activeOrder.filter((id, index) => typeof id === 'string' && activeOrder.indexOf(id) === index);
+    const rest = decompilerSettings.providerOrder.filter(id => !active.includes(id));
+    decompilerSettings.providerOrder = [...active, ...rest];
+}
+
+function arraysEqual(left, right) {
+    return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function decompilerRowPositions(list) {
+    const positions = new Map();
+    list.querySelectorAll('.decompiler-provider-row').forEach(row => {
+        positions.set(row.dataset.providerId, row.getBoundingClientRect().top);
+    });
+    return positions;
+}
+
+function animateDecompilerRows(list, previousPositions) {
+    if (!previousPositions || previousPositions.size === 0) return;
+    list.querySelectorAll('.decompiler-provider-row').forEach(row => {
+        const previousTop = previousPositions.get(row.dataset.providerId);
+        if (previousTop == null) return;
+        const delta = previousTop - row.getBoundingClientRect().top;
+        if (Math.abs(delta) < 1) return;
+        row.style.transition = 'transform 0s';
+        row.style.transform = `translateY(${delta}px)`;
+        requestAnimationFrame(() => {
+            row.style.transition = '';
+            row.style.transform = '';
+        });
+    });
+}
+
+function decompilerProviderIssue(id, provider) {
+    if (!provider || provider.enabled !== true) return null;
+    if (id === 'oracle' && !provider.apiKeySet && !provider.apiKey) {
+        return 'Authorization required. Add an Oracle API key before this provider can run.';
+    }
+    if (id !== 'builtin' && typeof provider.endpoint === 'string' && provider.endpoint.trim() === '') {
+        return 'Endpoint required. Open provider settings and add a URL.';
+    }
+    return null;
+}
+
+function decompilerProviderIssueSummaries() {
+    if (!decompilerSettings) return [];
+    return activeDecompilerOrder().map(id => {
+        const issue = decompilerProviderIssue(id, ensureDecompilerProvider(id));
+        return issue ? `${providerUi(id).label}: ${issue}` : null;
+    }).filter(Boolean);
+}
+
+function updateDecompilerSaveState() {
+    const button = $('saveDecompilerBtn');
+    if (!button || !decompilerSettings) return;
+    const issues = decompilerProviderIssueSummaries();
+    button.disabled = issues.length > 0;
+    button.setAttribute('aria-disabled', issues.length > 0 ? 'true' : 'false');
+    button.setAttribute('aria-label', issues.length > 0 ? `Fix provider issues before saving. ${issues[0]}` : 'Save decompiler settings');
+}
+
+function decompilerProviderByline(id, provider) {
+    if (id === 'shiny') {
+        return shinyMode(provider) === 'hosted' ? 'hosted' : 'local server';
+    }
+    return providerUi(id).byline;
+}
+
+function decompilerProviderHealth(id) {
+    const health = decompilerSettings?.health?.providers;
+    return health && typeof health === 'object' ? health[id] : null;
+}
+
+function decompilerHealthLabel(status) {
+    switch (status) {
+        case 'healthy': return 'Healthy';
+        case 'slow': return 'Slow';
+        case 'cooling_down': return 'Cooling down';
+        case 'rate_limited': return 'Rate limited';
+        case 'timing_out': return 'Timing out';
+        default: return 'Unknown';
+    }
+}
+
+function decompilerHealthClass(status) {
+    if (status === 'healthy') return 'decompiler-health-pill--healthy';
+    if (status === 'slow') return 'decompiler-health-pill--slow';
+    if (status === 'rate_limited' || status === 'timing_out') return 'decompiler-health-pill--bad';
+    if (status === 'cooling_down') return 'decompiler-health-pill--cooldown';
+    return '';
+}
+
+function relativeDecompilerHealthTime(iso) {
+    const time = Date.parse(iso || '');
+    if (!Number.isFinite(time)) return '';
+    const ageSeconds = Math.max(0, Math.round((Date.now() - time) / 1000));
+    if (ageSeconds < 5) return 'just now';
+    if (ageSeconds < 60) return `${ageSeconds}s ago`;
+    return `${Math.round(ageSeconds / 60)}m ago`;
+}
+
+function decompilerHealthHtml(id) {
+    const health = decompilerProviderHealth(id);
+    if (!health || !health.status) return '';
+    const status = health.status;
+    const detail = [];
+    if (Number.isFinite(Number(health.latencyMs))) detail.push(`${Math.round(Number(health.latencyMs))}ms`);
+    if (Number.isFinite(Number(health.throughputPerSecond))) {
+        detail.push(`${Number(health.throughputPerSecond).toFixed(1)} scripts/s`);
+    }
+    const age = relativeDecompilerHealthTime(health.updatedAt);
+    if (age) detail.push(age);
+    const titleBits = [decompilerHealthLabel(status)];
+    if (health.lastError) titleBits.push(health.lastError);
+    return `
+        <div class="decompiler-provider-health">
+            <span class="decompiler-health-pill ${decompilerHealthClass(status)}" title="${escapeHtml(titleBits.join(' · '))}">${escapeHtml(decompilerHealthLabel(status))}</span>
+            ${detail.length ? `<span class="decompiler-health-detail">${escapeHtml(detail.join(' · '))}</span>` : ''}
+        </div>
+    `;
+}
+
+function decompilerRowHtml(id, index) {
+    const provider = ensureDecompilerProvider(id);
+    const ui = providerUi(id);
+    const issue = decompilerProviderIssue(id, provider);
+    const locked = ui.locked === true;
+    const dragSvg = '<svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor" aria-hidden="true"><circle cx="5" cy="3.5" r="1.15"/><circle cx="10" cy="3.5" r="1.15"/><circle cx="5" cy="7.5" r="1.15"/><circle cx="10" cy="7.5" r="1.15"/><circle cx="5" cy="11.5" r="1.15"/><circle cx="10" cy="11.5" r="1.15"/></svg>';
+    const issueSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>';
+    const removeSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+    const settingsSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.1 4.3l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06A2 2 0 1 1 19.7 7.1l-.06.06A1.65 1.65 0 0 0 19.4 9c.26.6.85 1 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+    const meta = id === 'builtin'
+        ? ui.description
+        : `${decompilerProviderByline(id, provider)}${provider.endpoint ? ' · ' + provider.endpoint : ''}`;
+
+    return `
+        <div class="decompiler-provider-row ${locked ? 'decompiler-provider-row--pinned' : ''}" data-provider-id="${escapeHtml(id)}" draggable="false">
+            <button class="decompiler-drag-handle" type="button" aria-label="${locked ? 'Provider is locked' : 'Drag to reorder'}" aria-disabled="${locked ? 'true' : 'false'}">${dragSvg}</button>
+            <div class="decompiler-rank">#${index + 1}</div>
+            <div class="decompiler-provider-copy">
+                <div class="decompiler-provider-name">${escapeHtml(ui.label)}</div>
+                <div class="decompiler-provider-meta">${escapeHtml(meta)}</div>
+                ${decompilerHealthHtml(id)}
+            </div>
+            <div class="decompiler-provider-actions">
+                ${issue ? `<button class="decompiler-row-icon-btn decompiler-row-icon-btn--issue" type="button" data-tooltip="${escapeHtml(issue)}" aria-label="${escapeHtml(issue)}">${issueSvg}</button>` : ''}
+                ${!locked ? `<button class="decompiler-row-icon-btn" type="button" data-action="remove-provider" title="Remove provider">${removeSvg}</button>` : ''}
+                ${id !== 'builtin' ? `<button class="decompiler-row-icon-btn" type="button" data-action="open-provider-settings" title="Provider settings">${settingsSvg}</button>` : ''}
+            </div>
+        </div>
+    `;
+}
+
+function renderDecompilerSettings(options = {}) {
+    const list = $('settingsDecompilerList');
+    if (!list || !decompilerSettings) return;
+    const previousPositions = options.animate ? decompilerRowPositions(list) : null;
+    const active = activeDecompilerOrder();
+    list.innerHTML = active.length
+        ? active.map((id, index) => decompilerRowHtml(id, index)).join('')
+        : '<div class="settings-decompiler-empty">No providers enabled</div>';
+    if (options.animate) animateDecompilerRows(list, previousPositions);
+    renderDecompilerAddMenu();
+    renderDecompilerRuntimeSettings();
+    updateDecompilerSaveState();
+}
+
+function renderDecompilerAddMenu() {
+    const menu = $('settingsAddDecompilerMenu');
+    if (!menu || !decompilerSettings) return;
+    const disabled = knownDecompilerIds().filter(id => !ensureDecompilerProvider(id).enabled);
+    if (!disabled.length) {
+        menu.innerHTML = '<div class="settings-add-provider-item settings-add-provider-item--empty"><span>All providers are already in the chain</span></div>';
+        return;
+    }
+    menu.innerHTML = disabled.map(id => {
+        const ui = providerUi(id);
+        return `<button class="settings-add-provider-item" type="button" data-add-provider="${escapeHtml(id)}"><strong>${escapeHtml(ui.label)}</strong><span>${escapeHtml(ui.byline)}</span></button>`;
+    }).join('');
+}
+
+function collectDecompilerSettings() {
+    normalizeDecompilerState();
+    const providers = {};
+    for (const id of knownDecompilerIds()) {
+        const current = ensureDecompilerProvider(id);
+        const provider = {
+            enabled: current.enabled === true,
+            endpoint: current.endpoint || '',
+            version: current.version == null ? null : Number(current.version),
+            options: current.options && typeof current.options === 'object' && !Array.isArray(current.options) ? current.options : {}
+        };
+        if (current.apiKey && !String(current.apiKey).startsWith('••')) provider.apiKey = current.apiKey;
+        providers[id] = provider;
+    }
+
+    return {
+        providerOrder: decompilerSettings.providerOrder,
+        providers,
+        runtime: collectDecompilerRuntimeSettings()
+    };
+}
+
+function collectDecompilerRuntimeSettings() {
+    const current = normalizeDecompilerRuntime(decompilerSettings?.runtime);
+    const secondsField = (id, fallback, min, max) => {
+        const value = Number($(id)?.value);
+        if (!Number.isFinite(value)) return fallback;
+        return Math.round(clampRuntimeNumber(value, min / 1000, max / 1000) * 1000);
+    };
+    return {
+        ...current,
+        adaptiveFallback: $('decompilerAdaptiveFallback')?.checked !== false,
+        loadBalanceSlowProviders: $('decompilerLoadBalanceSlowProviders')?.checked !== false,
+        overallTimeoutMs: secondsField('decompilerOverallTimeout', current.overallTimeoutMs, 3000, 60000),
+        slowAfterMs: secondsField('decompilerSlowAfter', current.slowAfterMs, 500, 60000),
+        cooldownMs: secondsField('decompilerCooldown', current.cooldownMs, 5000, 600000),
+        slowSuccessLimit: Math.round(clampRuntimeNumber($('decompilerSlowLimit')?.value, current.slowSuccessLimit, 1, 20)),
+        timeoutLimit: Math.round(clampRuntimeNumber($('decompilerTimeoutLimit')?.value, current.timeoutLimit, 1, 20)),
+        providerTimeoutsMs: { ...current.providerTimeoutsMs }
+    };
 }
 function updateProviderUI() {
     document.querySelectorAll('#providerToggle .settings-provider-btn').forEach(b => {
         b.classList.toggle('settings-provider-btn--active', b.dataset.provider === settingsProvider);
     });
-    $('settingsOpenai').style.display = settingsProvider === 'openai' ? 'block' : 'none';
-    $('settingsOllama').style.display = settingsProvider === 'ollama' ? 'block' : 'none';
+    const enabled = semanticSearchEnabled !== false;
+    $('settingsOpenai').style.display = enabled && settingsProvider === 'openai' ? 'block' : 'none';
+    $('settingsOllama').style.display = enabled && settingsProvider === 'ollama' ? 'block' : 'none';
 }
 document.querySelectorAll('#providerToggle .settings-provider-btn').forEach(b => {
     b.addEventListener('click', () => { settingsProvider = b.dataset.provider; updateProviderUI(); });
@@ -2611,6 +3230,599 @@ async function saveSettings(body) {
         showToast('Network error saving settings', 'error');
     }
 }
+
+async function saveDecompilerSettings() {
+    const issues = decompilerProviderIssueSummaries();
+    if (issues.length) {
+        renderDecompilerSettings();
+        showToast(`Fix provider issues before saving: ${issues[0]}`, 'error');
+        return false;
+    }
+
+    let body;
+    try {
+        body = collectDecompilerSettings();
+    } catch(e) {
+        showToast(e.message || 'Invalid decompiler settings', 'error');
+        return false;
+    }
+
+    try {
+        const res = await fetch('/api/decompiler-settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        if (res.ok) {
+            await loadDecompilerSettings();
+            showToast('Decompiler settings saved', 'success');
+            return true;
+        } else {
+            const data = await res.json().catch(() => ({}));
+            showToast(data.error || 'Failed to save decompiler settings', 'error');
+            return false;
+        }
+    } catch(e) {
+        showToast('Network error saving decompiler settings', 'error');
+        return false;
+    }
+}
+
+function activateDecompilerProvider(id) {
+    const provider = ensureDecompilerProvider(id);
+    provider.enabled = true;
+    const order = decompilerSettings.providerOrder.filter(existing => existing !== id);
+    const active = order.filter(existing => ensureDecompilerProvider(existing).enabled);
+    const inactive = order.filter(existing => !ensureDecompilerProvider(existing).enabled);
+    decompilerSettings.providerOrder = [...active, id, ...inactive];
+    renderDecompilerSettings({ animate: true });
+}
+
+function removeDecompilerProvider(id) {
+    ensureDecompilerProvider(id).enabled = false;
+    renderDecompilerSettings({ animate: true });
+}
+
+function moveDecompilerProvider(dragId, targetId, insertAfter, options = {}) {
+    if (!dragId || !targetId || dragId === targetId) return false;
+    const current = activeDecompilerOrder();
+    const movable = current.filter(id => id !== dragId);
+    const targetIndex = movable.indexOf(targetId);
+    if (targetIndex === -1) return false;
+    movable.splice(targetIndex + (insertAfter ? 1 : 0), 0, dragId);
+    if (arraysEqual(current, movable)) return false;
+    setActiveDecompilerOrder(movable);
+    renderDecompilerSettings({ animate: options.animate === true });
+    return true;
+}
+
+function decompilerDomPositions(list) {
+    const positions = new Map();
+    list.querySelectorAll('.decompiler-provider-row, .decompiler-provider-placeholder').forEach((node) => {
+        positions.set(node, node.getBoundingClientRect().top);
+    });
+    return positions;
+}
+
+function animateDecompilerDomShift(list, previousPositions) {
+    if (!previousPositions || previousPositions.size === 0) return;
+    list.querySelectorAll('.decompiler-provider-row, .decompiler-provider-placeholder').forEach((node) => {
+        const previousTop = previousPositions.get(node);
+        if (previousTop == null) return;
+        const delta = previousTop - node.getBoundingClientRect().top;
+        if (Math.abs(delta) < 1) return;
+        node.style.transition = 'transform 0s';
+        node.style.transform = `translateY(${delta}px)`;
+        requestAnimationFrame(() => {
+            node.style.transition = '';
+            node.style.transform = '';
+        });
+    });
+}
+
+function orderFromDecompilerDom(list, dragId, placeholder) {
+    const order = [];
+    for (const child of Array.from(list.children)) {
+        if (child === placeholder) {
+            order.push(dragId);
+        } else if (child.classList.contains('decompiler-provider-row')) {
+            order.push(child.dataset.providerId);
+        }
+    }
+    return order.filter(Boolean);
+}
+
+function updateDecompilerPreviewRanks() {
+    if (!decompilerDragState) return;
+    const { list, row: liftedRow, dragId, placeholder } = decompilerDragState;
+    const order = orderFromDecompilerDom(list, dragId, placeholder);
+    order.forEach((id, index) => {
+        const row = id === dragId
+            ? liftedRow
+            : Array.from(list.querySelectorAll('.decompiler-provider-row')).find((item) => item.dataset.providerId === id);
+        const rank = row?.querySelector('.decompiler-rank');
+        if (rank) rank.textContent = `#${index + 1}`;
+    });
+}
+
+function moveDecompilerPlaceholder(clientY) {
+    if (!decompilerDragState) return;
+    const { list, placeholder } = decompilerDragState;
+    const rows = Array.from(list.querySelectorAll('.decompiler-provider-row'));
+    let beforeRow = null;
+
+    for (const row of rows) {
+        const rect = row.getBoundingClientRect();
+        if (clientY < rect.top + rect.height / 2) {
+            beforeRow = row;
+            break;
+        }
+    }
+
+    if (beforeRow === placeholder.nextSibling) return;
+    const previousPositions = decompilerDomPositions(list);
+    if (beforeRow) {
+        list.insertBefore(placeholder, beforeRow);
+    } else {
+        list.appendChild(placeholder);
+    }
+    animateDecompilerDomShift(list, previousPositions);
+    updateDecompilerPreviewRanks();
+}
+
+function updateDecompilerPointerDrag(e) {
+    if (!decompilerDragState) return;
+    const { row, offsetX, offsetY } = decompilerDragState;
+    e.preventDefault();
+    row.style.left = `${e.clientX - offsetX}px`;
+    row.style.top = `${e.clientY - offsetY}px`;
+    moveDecompilerPlaceholder(e.clientY);
+}
+
+function finishDecompilerPointerDrag(e) {
+    if (!decompilerDragState) return;
+    if (e) e.preventDefault();
+
+    const state = decompilerDragState;
+    const { list, row, placeholder, dragId } = state;
+    const finalOrder = orderFromDecompilerDom(list, dragId, placeholder);
+    const targetRect = placeholder.getBoundingClientRect();
+
+    document.removeEventListener('pointermove', updateDecompilerPointerDrag);
+    document.removeEventListener('pointerup', finishDecompilerPointerDrag);
+    document.removeEventListener('pointercancel', cancelDecompilerPointerDrag);
+    document.body.classList.remove('decompiler-drag-active');
+
+    row.style.transition = 'top 0.16s cubic-bezier(0.2, 0, 0, 1), left 0.16s cubic-bezier(0.2, 0, 0, 1), width 0.16s cubic-bezier(0.2, 0, 0, 1), transform 0.16s cubic-bezier(0.2, 0, 0, 1)';
+    row.style.left = `${targetRect.left}px`;
+    row.style.top = `${targetRect.top}px`;
+    row.style.width = `${targetRect.width}px`;
+    row.style.transform = 'scale(1)';
+
+    window.setTimeout(() => {
+        setActiveDecompilerOrder(finalOrder);
+        decompilerDragState = null;
+        decompilerDragId = null;
+        if (row.isConnected && row.parentElement !== list) row.remove();
+        placeholder.remove();
+        renderDecompilerSettings();
+    }, 170);
+}
+
+function cancelDecompilerPointerDrag(e) {
+    if (!decompilerDragState) return;
+    if (e) e.preventDefault();
+    const { row, placeholder } = decompilerDragState;
+    document.removeEventListener('pointermove', updateDecompilerPointerDrag);
+    document.removeEventListener('pointerup', finishDecompilerPointerDrag);
+    document.removeEventListener('pointercancel', cancelDecompilerPointerDrag);
+    document.body.classList.remove('decompiler-drag-active');
+    if (row.isConnected && row.parentElement !== $('settingsDecompilerList')) row.remove();
+    placeholder.remove();
+    decompilerDragState = null;
+    decompilerDragId = null;
+    renderDecompilerSettings();
+}
+
+function startDecompilerPointerDrag(e) {
+    if (e.button != null && e.button !== 0) return;
+    const handle = e.target.closest('.decompiler-drag-handle');
+    const row = handle?.closest('.decompiler-provider-row');
+    const list = $('settingsDecompilerList');
+    if (!handle || !row || !list || handle.getAttribute('aria-disabled') === 'true') return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    const rect = row.getBoundingClientRect();
+    const placeholder = document.createElement('div');
+    placeholder.className = 'decompiler-provider-placeholder';
+    placeholder.style.height = `${rect.height}px`;
+    placeholder.dataset.providerId = row.dataset.providerId;
+    list.insertBefore(placeholder, row);
+
+    decompilerDragId = row.dataset.providerId;
+    decompilerDragState = {
+        dragId: decompilerDragId,
+        list,
+        row,
+        placeholder,
+        offsetX: e.clientX - rect.left,
+        offsetY: e.clientY - rect.top
+    };
+
+    row.classList.add('decompiler-provider-row--lifted');
+    row.style.position = 'fixed';
+    row.style.left = `${rect.left}px`;
+    row.style.top = `${rect.top}px`;
+    row.style.width = `${rect.width}px`;
+    row.style.height = `${rect.height}px`;
+    row.style.margin = '0';
+    row.style.zIndex = '10050';
+    row.style.pointerEvents = 'none';
+    row.style.transform = 'scale(1.01)';
+    document.body.appendChild(row);
+    document.body.classList.add('decompiler-drag-active');
+    updateDecompilerPreviewRanks();
+
+    document.addEventListener('pointermove', updateDecompilerPointerDrag);
+    document.addEventListener('pointerup', finishDecompilerPointerDrag);
+    document.addEventListener('pointercancel', cancelDecompilerPointerDrag);
+}
+
+function clearDecompilerDragState() {
+    if (decompilerDragState) {
+        cancelDecompilerPointerDrag();
+        return;
+    }
+    decompilerDragId = null;
+    document.querySelectorAll('.decompiler-provider-row--dragging').forEach(row => {
+        row.classList.remove('decompiler-provider-row--dragging');
+    });
+}
+
+function closeDecompilerProviderModal() {
+    $('decompilerProviderModal').classList.remove('open');
+    decompilerModalProviderId = null;
+}
+
+function closeDecompilerRuntimeModal() {
+    $('decompilerRuntimeModal').classList.remove('open');
+    renderDecompilerRuntimeSettings();
+}
+
+function openDecompilerRuntimeModal() {
+    decompilerRuntimeAdvancedOpen = false;
+    renderDecompilerRuntimeSettings();
+    $('decompilerRuntimeModal').classList.add('open');
+}
+
+async function saveDecompilerRuntimeModal() {
+    const saved = await saveDecompilerSettings();
+    if (saved) closeDecompilerRuntimeModal();
+}
+
+function openDecompilerProviderModal(id, options = {}) {
+    if (id === 'builtin') return;
+    decompilerModalProviderId = id;
+    const provider = ensureDecompilerProvider(id);
+    const ui = providerUi(id);
+    $('decompilerProviderModalTitle').textContent = id === 'oracle' ? 'Oracle settings' : `${ui.label} settings`;
+    $('decompilerProviderModalDesc').textContent =
+        id === 'oracle' ? 'Configure decompiler options.' : ui.description;
+    $('decompilerProviderBody').innerHTML = id === 'oracle'
+        ? oracleProviderModalHtml(provider)
+        : endpointProviderModalHtml(id, provider);
+    $('decompilerProviderModal').classList.add('open');
+    if (options.refreshSetup !== false) refreshDecompilerSetupStatus(id);
+}
+
+function oracleProviderModalHtml(provider) {
+    const maskedKey = provider.apiKey || (provider.apiKeySet ? '••••••••' : '');
+    const version = provider.version == null ? '' : String(provider.version);
+    const options = formatSettingsJson(provider.options);
+    const purchaseUrl = providerUi('oracle').purchaseUrl || '#';
+    return `
+        <div class="settings-field">
+            <label>API key <span class="settings-required">*</span></label>
+            <div class="decompiler-input-action-row">
+                <input type="password" id="decompilerModalOracleKey" value="${escapeHtml(maskedKey)}" placeholder="Oracle API key">
+                <a class="modal-btn modal-btn--cancel decompiler-purchase-btn" href="${escapeHtml(purchaseUrl)}" target="_blank" rel="noreferrer">Purchase</a>
+            </div>
+        </div>
+        <button class="decompiler-advanced-toggle" type="button" data-action="toggle-provider-advanced">Advanced settings <span>${decompilerAdvancedOpen ? '^' : 'v'}</span></button>
+        <div class="decompiler-advanced-grid" id="decompilerAdvancedFields" ${decompilerAdvancedOpen ? '' : 'hidden'}>
+            <div class="settings-field">
+                <label>Version</label>
+                <input type="text" id="decompilerModalOracleVersion" value="${escapeHtml(version)}" placeholder="server default">
+            </div>
+            <div class="settings-field">
+                <label>Options JSON</label>
+                <textarea id="decompilerModalOracleOptions" rows="6" placeholder="{}">${escapeHtml(options)}</textarea>
+            </div>
+        </div>
+        <div class="decompiler-modal-note">The Oracle key is stored locally and sent to Roblox connectors that use this provider.</div>
+        <div class="decompiler-modal-footer">
+            <button class="modal-btn modal-btn--cancel" type="button" data-action="close-provider-modal">Cancel</button>
+            <button class="modal-btn modal-btn--primary" type="button" data-action="save-provider-modal">Save</button>
+        </div>
+    `;
+}
+
+function decompilerSetupPanelClass(setupState) {
+    if (!setupState) return '';
+    if (setupState.running || setupState.checking) return 'decompiler-setup-panel--running';
+    if (setupState.error || (setupState.installed && setupState.binaryExists === false)) return 'decompiler-setup-panel--error';
+    if (setupState.ok || setupState.installed) return 'decompiler-setup-panel--ok';
+    return '';
+}
+
+function decompilerSetupTitle(id, setupState) {
+    const ui = providerUi(id);
+    if (setupState?.checking) return `Checking ${ui.label}`;
+    if (setupState?.installed) return `${ui.label} installed`;
+    return ui.setupLabel;
+}
+
+function decompilerSetupDescription(id, setupState) {
+    const ui = providerUi(id);
+    if (setupState?.checking) return 'Checking the saved local install record.';
+    if (setupState?.installed && setupState.binaryExists === false) {
+        return 'Install record exists, but the binary is missing. Repair downloads the latest release again.';
+    }
+    if (setupState?.installed && setupState.serverRunning) {
+        return 'Already installed and running. Check for updates downloads the latest release if needed.';
+    }
+    if (setupState?.installed) {
+        return 'Already installed. Check for updates downloads the latest release and starts the local endpoint.';
+    }
+    return ui.setupDescription || '';
+}
+
+function decompilerSetupButtonLabel(setupState) {
+    if (setupState?.running) return 'Setting up...';
+    if (setupState?.checking) return 'Checking...';
+    if (setupState?.installed && setupState.binaryExists === false) return 'Repair install';
+    if (setupState?.installed) return 'Check for updates';
+    return 'Run setup';
+}
+
+function shouldShowDecompilerSetupPanel(id, provider) {
+    const ui = providerUi(id);
+    if (!ui.setupLabel) return false;
+    return id !== 'shiny' || shinyMode(provider) === 'local';
+}
+
+function endpointProviderModalHtml(id, provider) {
+    const ui = providerUi(id);
+    const mode = id === 'shiny' ? shinyMode(provider) : null;
+    const storedEndpoint = id === 'shiny' && !provider.endpoint ? shinyEndpointForMode(mode) : provider.endpoint || '';
+    const endpoint = endpointDisplayForProvider(id, provider, storedEndpoint);
+    const note = id === 'fission'
+        ? 'Fission setup runs on the MCP computer; Roblox reaches it through the bridge host.'
+        : id === 'shiny'
+            ? (mode === 'hosted'
+                ? 'Uses the hosted Medal Server endpoint backed by Shiny.'
+                : 'Run Shiny on the MCP computer; Roblox reaches it through the bridge host.')
+            : ui.description;
+    const setupState = decompilerSetupState[id] || null;
+    const setupDetails = setupState ? setupState.details : '';
+    const setupHtml = shouldShowDecompilerSetupPanel(id, provider) ? `
+        <div class="decompiler-setup-panel ${decompilerSetupPanelClass(setupState)}">
+            <div>
+                <div class="decompiler-setup-title">${escapeHtml(decompilerSetupTitle(id, setupState))}</div>
+                <div class="decompiler-setup-desc">${escapeHtml(decompilerSetupDescription(id, setupState))}</div>
+            </div>
+            <button class="modal-btn modal-btn--cancel decompiler-setup-btn" type="button" data-action="setup-decompiler-provider" ${setupState?.running || setupState?.checking ? 'disabled' : ''}>
+                ${escapeHtml(decompilerSetupButtonLabel(setupState))}
+            </button>
+        </div>
+        ${setupState && setupDetails ? `<pre class="decompiler-setup-output">${escapeHtml(setupDetails)}</pre>` : ''}
+    ` : '';
+    const shinyModeHtml = id === 'shiny' ? `
+        <div class="settings-field">
+            <label>Mode</label>
+            <div class="settings-provider-toggle decompiler-mode-toggle">
+                <button class="settings-provider-btn ${mode === 'local' ? 'settings-provider-btn--active' : ''}" type="button" data-action="set-shiny-mode" data-mode="local">Local</button>
+                <button class="settings-provider-btn ${mode === 'hosted' ? 'settings-provider-btn--active' : ''}" type="button" data-action="set-shiny-mode" data-mode="hosted">Hosted</button>
+            </div>
+        </div>
+    ` : '';
+    return `
+        ${shinyModeHtml}
+        <div class="settings-field">
+            <label>Endpoint</label>
+            <input type="text" id="decompilerModalEndpoint" value="${escapeHtml(endpoint)}" placeholder="${escapeHtml(endpointDisplayForProvider(id, provider, id === 'shiny' ? shinyEndpointForMode(mode) : fissionLocalEndpoint()))}">
+        </div>
+        <div class="decompiler-modal-note">${escapeHtml(note)}</div>
+        ${setupHtml}
+        <div class="decompiler-modal-footer">
+            <button class="modal-btn modal-btn--cancel" type="button" data-action="close-provider-modal">Cancel</button>
+            <button class="modal-btn modal-btn--primary" type="button" data-action="save-provider-modal">Save</button>
+        </div>
+    `;
+}
+
+function decompilerSetupResultText(data) {
+    const lines = [];
+    if (data.endpoint) lines.push(`Endpoint: ${endpointToBridgeHostDisplay(data.endpoint)}`);
+    if (data.repoPath) lines.push(`Install path: ${data.repoPath}`);
+    if (data.binaryPath) lines.push(`Binary: ${data.binaryPath}`);
+    if (data.runCommand) lines.push(`Run command: ${data.runCommand}`);
+    if (data.logPath) lines.push(`Log: ${data.logPath}`);
+    if (data.alreadyRunning) lines.push('Server was already running.');
+    if (data.started) lines.push('Server started successfully.');
+    if (data.output) lines.push(data.output);
+    if (data.error) lines.push(`Error: ${data.error}`);
+    return lines.join('\n\n');
+}
+
+function decompilerSetupStatusText(data) {
+    if (!data.installed && !data.error) return '';
+    const lines = [];
+    if (data.installed) lines.push(data.serverRunning ? 'Installed and running.' : 'Installed.');
+    if (data.endpoint) lines.push(`Endpoint: ${endpointToBridgeHostDisplay(data.endpoint)}`);
+    if (data.repoPath) lines.push(`Install path: ${data.repoPath}`);
+    if (data.binaryPath) lines.push(`Binary: ${data.binaryPath}`);
+    if (data.logPath) lines.push(`Log: ${data.logPath}`);
+    if (data.updatedAt) lines.push(`Last updated: ${data.updatedAt}`);
+    if (data.error) lines.push(`Status note: ${data.error}`);
+    return lines.join('\n\n');
+}
+
+async function refreshDecompilerSetupStatus(id) {
+    if (!id) return;
+    const provider = ensureDecompilerProvider(id);
+    if (!shouldShowDecompilerSetupPanel(id, provider)) return;
+    if (decompilerSetupState[id]?.running) return;
+
+    const endpoint = endpointToMcpHostValue($('decompilerModalEndpoint')?.value || provider.endpoint || '');
+    decompilerSetupState[id] = {
+        ...(decompilerSetupState[id] || {}),
+        checking: true,
+        running: false,
+        error: false,
+    };
+    if (decompilerModalProviderId === id) openDecompilerProviderModal(id, { refreshSetup: false });
+
+    try {
+        const url = new URL('/api/decompiler-settings/setup', window.location.origin);
+        url.searchParams.set('provider', id);
+        if (endpoint) url.searchParams.set('endpoint', endpoint);
+        const res = await fetch(url);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Failed to check setup status');
+
+        decompilerSetupState[id] = {
+            checking: false,
+            running: false,
+            ok: data.installed === true && data.binaryExists !== false && !data.error,
+            error: Boolean(data.error) || (data.installed === true && data.binaryExists === false),
+            installed: data.installed === true,
+            binaryExists: data.binaryExists === true,
+            serverRunning: data.serverRunning === true,
+            details: decompilerSetupStatusText(data)
+        };
+    } catch(e) {
+        decompilerSetupState[id] = {
+            checking: false,
+            running: false,
+            ok: false,
+            error: true,
+            details: e instanceof Error ? e.message : 'Failed to check setup status.'
+        };
+    }
+
+    if (decompilerModalProviderId === id) openDecompilerProviderModal(id, { refreshSetup: false });
+}
+
+async function runDecompilerProviderSetup(id) {
+    if (!id || !providerUi(id).setupLabel) return;
+    decompilerSetupState[id] = {
+        ...(decompilerSetupState[id] || {}),
+        checking: false,
+        running: true,
+        ok: false,
+        error: false,
+        details: ''
+    };
+    openDecompilerProviderModal(id, { refreshSetup: false });
+
+    try {
+        const provider = ensureDecompilerProvider(id);
+        const endpoint = endpointToMcpHostValue($('decompilerModalEndpoint')?.value || provider.endpoint || '');
+        const res = await fetch('/api/decompiler-settings/setup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: id, endpoint })
+        });
+        const data = await res.json().catch(() => ({}));
+        const ok = res.ok && data.ok === true;
+        decompilerSetupState[id] = {
+            checking: false,
+            running: false,
+            ok,
+            error: !ok,
+            installed: ok ? true : decompilerSetupState[id]?.installed === true,
+            binaryExists: ok ? true : decompilerSetupState[id]?.binaryExists === true,
+            serverRunning: ok ? Boolean(data.started || data.alreadyRunning) : decompilerSetupState[id]?.serverRunning === true,
+            details: decompilerSetupResultText(data)
+        };
+
+        if (ok && typeof data.endpoint === 'string' && data.endpoint) {
+            provider.endpoint = data.endpoint;
+            if (id === 'shiny') setShinyMode(provider, 'local', true);
+            provider.enabled = true;
+            if (!activeDecompilerOrder().includes(id)) activateDecompilerProvider(id);
+            await saveDecompilerSettings();
+            showToast(`${providerUi(id).label} setup complete`, 'success');
+        } else if (ok) {
+            showToast(`${providerUi(id).label} setup complete`, 'success');
+        } else {
+            showToast(data.error || `${providerUi(id).label} setup failed`, 'error');
+        }
+    } catch(e) {
+        decompilerSetupState[id] = {
+            checking: false,
+            running: false,
+            ok: false,
+            error: true,
+            details: e instanceof Error ? e.message : 'Network error.'
+        };
+        showToast(`Network error setting up ${providerUi(id).label}`, 'error');
+    }
+
+    if (decompilerModalProviderId === id) openDecompilerProviderModal(id, { refreshSetup: false });
+}
+
+async function saveDecompilerProviderModal() {
+    const id = decompilerModalProviderId;
+    if (!id) return;
+    const provider = ensureDecompilerProvider(id);
+
+    if (id === 'oracle') {
+        const key = ($('decompilerModalOracleKey')?.value || '').trim();
+        if (key && !key.startsWith('••')) {
+            provider.apiKey = key;
+            provider.apiKeySet = true;
+        }
+        const version = ($('decompilerModalOracleVersion')?.value || '').trim();
+        provider.version = version ? Number(version) : null;
+        const rawOptions = ($('decompilerModalOracleOptions')?.value || '').trim();
+        try {
+            provider.options = rawOptions ? JSON.parse(rawOptions) : {};
+        } catch(e) {
+            showToast('Oracle options must be valid JSON', 'error');
+            return;
+        }
+        if (!provider.options || typeof provider.options !== 'object' || Array.isArray(provider.options)) {
+            showToast('Oracle options must be a JSON object', 'error');
+            return;
+        }
+    } else {
+        if (id === 'shiny') {
+            const mode = $('decompilerProviderBody')?.querySelector('[data-action="set-shiny-mode"].settings-provider-btn--active')?.dataset.mode || shinyMode(provider);
+            setShinyMode(provider, mode, true);
+        }
+        const endpoint = endpointToMcpHostValue($('decompilerModalEndpoint')?.value || '');
+        if (!endpoint) {
+            showToast('Endpoint is required for this provider', 'error');
+            return;
+        }
+        provider.endpoint = endpoint;
+    }
+
+    provider.enabled = true;
+    if (!activeDecompilerOrder().includes(id)) activateDecompilerProvider(id);
+    const saved = await saveDecompilerSettings();
+    if (saved) closeDecompilerProviderModal();
+}
+
+$('settingsSemanticEnabled').addEventListener('change', () => {
+    semanticSearchEnabled = $('settingsSemanticEnabled').checked;
+    updateSemanticSearchVisibility();
+});
+$('saveSemanticEnabledBtn').addEventListener('click', () => saveSettings({enabled:$('settingsSemanticEnabled').checked}));
 $('saveProviderBtn').addEventListener('click', () => saveSettings({provider:settingsProvider}));
 $('saveOpenaiBtn').addEventListener('click', () => {
     const key = $('settingsOpenaiKey').value;
@@ -2622,6 +3834,81 @@ $('saveOpenaiBtn').addEventListener('click', () => {
     saveSettings(body);
 });
 $('saveOllamaBtn').addEventListener('click', () => saveSettings({ollamaBaseUrl:$('settingsOllamaUrl').value,ollamaModel:$('settingsOllamaModel').value}));
+$('saveDecompilerBtn').addEventListener('click', () => saveDecompilerSettings());
+$('settingsDecompilerRuntimeBtn').addEventListener('click', openDecompilerRuntimeModal);
+$('decompilerRuntimeCloseBtn').addEventListener('click', closeDecompilerRuntimeModal);
+$('decompilerRuntimeCancelBtn').addEventListener('click', closeDecompilerRuntimeModal);
+$('decompilerRuntimeSaveBtn').addEventListener('click', saveDecompilerRuntimeModal);
+$('decompilerRuntimeModal').addEventListener('click', (e) => {
+    if (e.target === $('decompilerRuntimeModal')) closeDecompilerRuntimeModal();
+});
+$('decompilerRuntimeAdvancedToggle').addEventListener('click', () => {
+    decompilerRuntimeAdvancedOpen = !decompilerRuntimeAdvancedOpen;
+    renderDecompilerRuntimeAdvanced();
+});
+$('decompilerRuntimeBody').addEventListener('input', (e) => {
+    if (e.target?.matches?.('input[type="range"]')) updateRuntimeSliderValue(e.target);
+});
+
+$('settingsAddDecompilerBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('settingsAddDecompilerMenu').classList.toggle('open');
+    renderDecompilerAddMenu();
+});
+
+$('settingsAddDecompilerMenu').addEventListener('click', (e) => {
+    const item = e.target.closest('[data-add-provider]');
+    if (!item) return;
+    const id = item.dataset.addProvider;
+    $('settingsAddDecompilerMenu').classList.remove('open');
+    activateDecompilerProvider(id);
+    if (id === 'oracle' || id === 'fission' || id === 'shiny') {
+        openDecompilerProviderModal(id);
+    }
+});
+
+$('settingsDecompilerList').addEventListener('click', (e) => {
+    const row = e.target.closest('.decompiler-provider-row');
+    if (!row) return;
+    const id = row.dataset.providerId;
+    const action = e.target.closest('[data-action]')?.dataset.action;
+    if (action === 'remove-provider') {
+        removeDecompilerProvider(id);
+    } else if (action === 'open-provider-settings') {
+        openDecompilerProviderModal(id);
+    }
+});
+
+$('settingsDecompilerList').addEventListener('pointerdown', startDecompilerPointerDrag);
+
+$('decompilerProviderCloseBtn').addEventListener('click', closeDecompilerProviderModal);
+$('decompilerProviderModal').addEventListener('click', (e) => {
+    if (e.target === $('decompilerProviderModal')) closeDecompilerProviderModal();
+});
+$('decompilerProviderBody').addEventListener('click', (e) => {
+    const action = e.target.closest('[data-action]')?.dataset.action;
+    if (action === 'close-provider-modal') {
+        closeDecompilerProviderModal();
+    } else if (action === 'toggle-provider-advanced') {
+        decompilerAdvancedOpen = !decompilerAdvancedOpen;
+        if (decompilerModalProviderId) openDecompilerProviderModal(decompilerModalProviderId);
+    } else if (action === 'setup-decompiler-provider') {
+        if (decompilerModalProviderId) runDecompilerProviderSetup(decompilerModalProviderId);
+    } else if (action === 'set-shiny-mode') {
+        const mode = e.target.dataset.mode === 'local' ? 'local' : 'hosted';
+        const provider = ensureDecompilerProvider('shiny');
+        setShinyMode(provider, mode);
+        openDecompilerProviderModal('shiny');
+    } else if (action === 'save-provider-modal') {
+        saveDecompilerProviderModal();
+    }
+});
+
+document.addEventListener('click', (e) => {
+    if (!$('settingsAddDecompilerMenu').contains(e.target) && !$('settingsAddDecompilerBtn').contains(e.target)) {
+        $('settingsAddDecompilerMenu').classList.remove('open');
+    }
+});
 async function showConfirmDialog({ title, desc }) {
     return new Promise((resolve) => {
         const modal = $('confirmModal');
@@ -2676,6 +3963,7 @@ $('settingsTestBtn').addEventListener('click', async () => {
     const r = $('settingsTestResult'); r.innerHTML = 'Testing…'; r.className = '';
     try {
         const body = {
+            enabled: semanticSearchEnabled,
             provider: settingsProvider,
             openaiBaseUrl: $('settingsOpenaiUrl').value,
             openaiModel: $('settingsOpenaiModel').value,
@@ -2734,7 +4022,9 @@ setInterval(() => {
         fetchScripts();
     }
 }, 5000);
+setInterval(refreshDecompilerHealth, 2000);
 
+loadSemanticSettings();
 updateStatus();
 setSidebarMode('home');
 showView('clients');
