@@ -399,7 +399,8 @@ async function selectAutoexecTargetsOpenTui(targets) {
       const dividerWidth = 1;
       const rightWidth = Math.max(26, viewportWidth - leftWidth - dividerWidth);
 
-      if (renderer.root.getRenderable("autoexec-target-root")) renderer.root.remove("autoexec-target-root");
+      const existingAutoexecRoot = renderer.root.getRenderable("autoexec-target-root");
+      if (existingAutoexecRoot) renderer.root.remove(existingAutoexecRoot);
       renderer.root.add(
         Box(
           {
@@ -1874,7 +1875,8 @@ async function selectHarnessesOpenTui(initial) {
       const dividerWidth = 1;
       const rightWidth = Math.max(24, viewportWidth - leftWidth - dividerWidth);
 
-      if (renderer.root.getRenderable("installer-root")) renderer.root.remove("installer-root");
+      const existingInstallerRoot = renderer.root.getRenderable("installer-root");
+      if (existingInstallerRoot) renderer.root.remove(existingInstallerRoot);
       renderer.root.add(
         Box(
           {
@@ -2613,7 +2615,8 @@ async function askYesNoOpenTui(label, fallback) {
       const yesActive = state.choice === "yes";
       const noActive = state.choice === "no";
 
-      if (renderer.root.getRenderable("yes-no-dialog-root")) renderer.root.remove("yes-no-dialog-root");
+      const existingYesNoRoot = renderer.root.getRenderable("yes-no-dialog-root");
+      if (existingYesNoRoot) renderer.root.remove(existingYesNoRoot);
       renderer.root.add(
         Box(
           {
@@ -2782,7 +2785,8 @@ async function askChoiceOpenTui(label, options, fallbackKey) {
       const sidePad = Math.max(0, Math.floor((viewportWidth - dialogWidth) / 2));
       const selected = options[state.index] || options[fallbackIndex] || options[0];
 
-      if (renderer.root.getRenderable("choice-dialog-root")) renderer.root.remove("choice-dialog-root");
+      const existingChoiceRoot = renderer.root.getRenderable("choice-dialog-root");
+      if (existingChoiceRoot) renderer.root.remove(existingChoiceRoot);
       renderer.root.add(
         Box(
           {
@@ -2952,7 +2956,8 @@ async function askInputOpenTui(label, fallback = "") {
       const inputPrefix = state.value ? "> " : "default ";
       const inputColor = state.value ? palette.text : palette.muted;
 
-      if (renderer.root.getRenderable("input-dialog-root")) renderer.root.remove("input-dialog-root");
+      const existingInputRoot = renderer.root.getRenderable("input-dialog-root");
+      if (existingInputRoot) renderer.root.remove(existingInputRoot);
       renderer.root.add(
         Box(
           {
