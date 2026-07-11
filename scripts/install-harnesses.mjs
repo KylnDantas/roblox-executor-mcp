@@ -3326,7 +3326,7 @@ function spawnCommand(command) {
 }
 
 function canUseRichPrompts() {
-  if (PLAIN_MODE || NO_OPENTUI) return false;
+  if (PLAIN_MODE || NO_OPENTUI || LEGACY_WINDOWS_CONSOLE) return false;
   if (!process.stdin.isTTY || !process.stdout.isTTY || !process.versions.bun) return false;
   return true;
 }
