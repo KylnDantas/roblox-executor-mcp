@@ -134,6 +134,7 @@ const LEGACY_WINDOWS_CONSOLE = process.platform === "win32" && !hasModernWindows
 const ASCII_MODE = FORCE_ASCII_MODE || LEGACY_WINDOWS_CONSOLE || !terminalCanRenderUnicode();
 const PLAIN_MODE = process.argv.includes("--plain");
 const NO_OPENTUI = process.argv.includes("--no-opentui");
+let OPEN_TUI_DISABLED = false;
 const SHOW_ALL_HARNESSES = process.argv.includes("--show-all-harnesses") || process.argv.includes("--all-harnesses");
 const AUTOEXEC_MODE = process.argv.includes("--autoexec");
 installSafeTerminalWrites();
@@ -360,6 +361,7 @@ async function selectAutoexecTargetsOpenTui(targets) {
       cleanup();
       resolve(selectedTargets);
     };
+    const fail = createOpenTuiFailureHandler(cleanup, reject);
     const visibleItems = () => {
       const q = state.search.trim().toLowerCase();
       return targets.filter((target) => {
@@ -373,7 +375,7 @@ async function selectAutoexecTargetsOpenTui(targets) {
         return !q || haystack.includes(q);
       });
     };
-    const render = () => {
+    const render = guardOpenTuiHandler(() => {
       if (!renderer || settled) return;
       const items = visibleItems();
       if (state.cursor >= items.length) state.cursor = Math.max(0, items.length - 1);
@@ -535,8 +537,8 @@ async function selectAutoexecTargetsOpenTui(targets) {
         )
       );
       renderer.requestRender();
-    };
-    const onKey = (key) => {
+    }, fail);
+    const onKey = guardOpenTuiHandler((key) => {
       if (settled) return;
       const items = visibleItems();
       if (key.name === "c" && key.ctrl) {
@@ -573,7 +575,7 @@ async function selectAutoexecTargetsOpenTui(targets) {
         return;
       }
       render();
-    };
+    }, fail);
 
     createCliRenderer(openTuiRendererConfig(ui.bg)).then((created) => {
       if (settled) {
@@ -585,10 +587,7 @@ async function selectAutoexecTargetsOpenTui(targets) {
       renderer.on("resize", render);
       hideCursor();
       render();
-    }).catch((error) => {
-      cleanup();
-      reject(error);
-    });
+    }).catch(fail);
   });
 }
 
@@ -1840,11 +1839,12 @@ async function selectHarnessesOpenTui(initial) {
       settled = true;
       if (renderer) renderer.destroy();
     };
+    const fail = createOpenTuiFailureHandler(cleanup, reject);
     const visibleItems = () => {
       const q = state.search.trim().toLowerCase();
       return pickerHarnesses(state.showAll).filter((h) => !q || `${h.name} ${h.id} ${h.group}`.toLowerCase().includes(q));
     };
-    const render = () => {
+    const render = guardOpenTuiHandler(() => {
       if (!renderer || settled) return;
       const items = visibleItems();
       if (state.cursor >= items.length) state.cursor = Math.max(0, items.length - 1);
@@ -2015,8 +2015,8 @@ async function selectHarnessesOpenTui(initial) {
         )
       );
       renderer.requestRender();
-    };
-    const onKey = (key) => {
+    }, fail);
+    const onKey = guardOpenTuiHandler((key) => {
       if (settled) return;
       const items = visibleItems();
       if (key.name === "c" && key.ctrl) {
@@ -2060,7 +2060,7 @@ async function selectHarnessesOpenTui(initial) {
         return;
       }
       render();
-    };
+    }, fail);
 
     createCliRenderer(openTuiRendererConfig(ui.bg)).then((created) => {
       if (settled) {
@@ -2071,11 +2071,35 @@ async function selectHarnessesOpenTui(initial) {
       renderer.keyInput.on("keypress", onKey);
       renderer.on("resize", render);
       render();
-    }).catch((error) => {
-      cleanup();
-      reject(error);
-    });
+    }).catch(fail);
   });
+}
+
+function guardOpenTuiHandler(handler, fail) {
+  return (...args) => {
+    try {
+      const result = handler(...args);
+      if (result && typeof result.then === "function") {
+        result.catch(fail);
+      }
+    } catch (error) {
+      fail(error);
+    }
+  };
+}
+
+function createOpenTuiFailureHandler(cleanup, reject) {
+  return (error) => {
+    OPEN_TUI_DISABLED = true;
+    cleanup();
+    restoreTerminalAfterOpenTui();
+    reject(error);
+  };
+}
+
+function restoreTerminalAfterOpenTui() {
+  showCursor();
+  leaveAlternateScreen();
 }
 
 async function loadOpenTui() {
@@ -2530,6 +2554,7 @@ async function askInput(label, fallback) {
       return await askInputOpenTui(label, fallback);
     } catch (error) {
       log("warn", `OpenTUI input unavailable: ${error.message || error}`);
+      log("info", "Falling back to the plain numbered prompt.");
     }
   }
 
@@ -2546,6 +2571,7 @@ async function askYesNo(label, fallback) {
       return await askYesNoOpenTui(label, fallback);
     } catch (error) {
       log("warn", `OpenTUI prompt unavailable: ${error.message || error}`);
+      log("info", "Falling back to the plain prompt.");
     }
   }
 
@@ -2562,6 +2588,7 @@ async function askChoice(label, options, fallbackKey) {
       return await askChoiceOpenTui(label, options, fallbackKey);
     } catch (error) {
       log("warn", `OpenTUI choice prompt unavailable: ${error.message || error}`);
+      log("info", "Falling back to the plain prompt.");
     }
   }
 
@@ -2604,7 +2631,8 @@ async function askYesNoOpenTui(label, fallback) {
       cleanup();
       resolve(value);
     };
-    const render = () => {
+    const fail = createOpenTuiFailureHandler(cleanup, reject);
+    const render = guardOpenTuiHandler(() => {
       if (!renderer || settled) return;
       const viewportWidth = Math.max(60, Number(renderer.width || process.stdout.columns) || 100);
       const viewportHeight = Math.max(20, Number(renderer.height || process.stdout.rows) || 30);
@@ -2693,8 +2721,8 @@ async function askYesNoOpenTui(label, fallback) {
         )
       );
       renderer.requestRender();
-    };
-    const onKey = (key) => {
+    }, fail);
+    const onKey = guardOpenTuiHandler((key) => {
       if (settled) return;
       if (key.name === "c" && key.ctrl) {
         cleanup();
@@ -2716,7 +2744,7 @@ async function askYesNoOpenTui(label, fallback) {
         return;
       }
       render();
-    };
+    }, fail);
 
     createCliRenderer(openTuiRendererConfig(palette.bg)).then((created) => {
       if (settled) {
@@ -2728,10 +2756,7 @@ async function askYesNoOpenTui(label, fallback) {
       renderer.on("resize", render);
       hideCursor();
       render();
-    }).catch((error) => {
-      cleanup();
-      reject(error);
-    });
+    }).catch(fail);
   });
 }
 
@@ -2775,7 +2800,8 @@ async function askChoiceOpenTui(label, options, fallbackKey) {
       cleanup();
       resolve(key);
     };
-    const render = () => {
+    const fail = createOpenTuiFailureHandler(cleanup, reject);
+    const render = guardOpenTuiHandler(() => {
       if (!renderer || settled) return;
       const viewportWidth = Math.max(70, Number(renderer.width || process.stdout.columns) || 110);
       const viewportHeight = Math.max(22, Number(renderer.height || process.stdout.rows) || 30);
@@ -2861,8 +2887,8 @@ async function askChoiceOpenTui(label, options, fallbackKey) {
         )
       );
       renderer.requestRender();
-    };
-    const onKey = (key) => {
+    }, fail);
+    const onKey = guardOpenTuiHandler((key) => {
       if (settled) return;
       if (key.name === "c" && key.ctrl) {
         cleanup();
@@ -2886,7 +2912,7 @@ async function askChoiceOpenTui(label, options, fallbackKey) {
         }
       }
       render();
-    };
+    }, fail);
 
     createCliRenderer(openTuiRendererConfig(palette.bg)).then((created) => {
       if (settled) {
@@ -2898,10 +2924,7 @@ async function askChoiceOpenTui(label, options, fallbackKey) {
       renderer.on("resize", render);
       hideCursor();
       render();
-    }).catch((error) => {
-      cleanup();
-      reject(error);
-    });
+    }).catch(fail);
   });
 }
 
@@ -2944,7 +2967,8 @@ async function askInputOpenTui(label, fallback = "") {
       cleanup();
       resolve(value);
     };
-    const render = () => {
+    const fail = createOpenTuiFailureHandler(cleanup, reject);
+    const render = guardOpenTuiHandler(() => {
       if (!renderer || settled) return;
       const viewportWidth = Math.max(60, Number(renderer.width || process.stdout.columns) || 100);
       const viewportHeight = Math.max(20, Number(renderer.height || process.stdout.rows) || 30);
@@ -3046,8 +3070,8 @@ async function askInputOpenTui(label, fallback = "") {
         )
       );
       renderer.requestRender();
-    };
-    const onKey = (key) => {
+    }, fail);
+    const onKey = guardOpenTuiHandler((key) => {
       if (settled) return;
       if (key.name === "c" && key.ctrl) {
         cleanup();
@@ -3068,7 +3092,7 @@ async function askInputOpenTui(label, fallback = "") {
         state.value += key.sequence;
       }
       render();
-    };
+    }, fail);
 
     createCliRenderer(openTuiRendererConfig(palette.bg)).then((created) => {
       if (settled) {
@@ -3080,10 +3104,7 @@ async function askInputOpenTui(label, fallback = "") {
       renderer.on("resize", render);
       hideCursor();
       render();
-    }).catch((error) => {
-      cleanup();
-      reject(error);
-    });
+    }).catch(fail);
   });
 }
 
@@ -3326,7 +3347,7 @@ function spawnCommand(command) {
 }
 
 function canUseRichPrompts() {
-  if (PLAIN_MODE || NO_OPENTUI || LEGACY_WINDOWS_CONSOLE) return false;
+  if (PLAIN_MODE || NO_OPENTUI || OPEN_TUI_DISABLED || LEGACY_WINDOWS_CONSOLE) return false;
   if (!process.stdin.isTTY || !process.stdout.isTTY || !process.versions.bun) return false;
   return true;
 }

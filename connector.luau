@@ -1648,6 +1648,8 @@ while true do
         while not getgenv().Cobalt and os.clock() - waitStart < 10 do
             task.wait(0.1)
         end
+
+        assert(getgenv().Cobalt, "Cobalt loaded but failed to initialize within 10 seconds.")
         
         return {
             status = "loaded",
@@ -1837,6 +1839,56 @@ while true do
         end
 
         error("Remote not found: " .. remoteName .. " in " .. direction .. " logs. Make sure the remote has been logged at least once.")
+    end)
+
+    -- Keep Cobalt's implementation details behind one public MCP operation.
+    -- The legacy callbacks above remain internal so this dispatcher can reuse
+    -- their validated filtering and state-change behavior.
+    Bridge:BindToType("remote-spy", function(data)
+        Bridge.Callbacks["ensure-remote-spy"]({})
+
+        local operation = data.operation
+        if operation == "status" then
+            local Cobalt = getgenv().Cobalt
+            local function CountLogs(logTable)
+                local count = 0
+                if typeof(logTable) ~= "table" then return count end
+                for _ in logTable do
+                    count += 1
+                end
+                return count
+            end
+
+            return {
+                status = "loaded",
+                outgoingRemotes = CountLogs(Cobalt.shared and Cobalt.shared.Logs and Cobalt.shared.Logs.Outgoing),
+                incomingRemotes = CountLogs(Cobalt.shared and Cobalt.shared.Logs and Cobalt.shared.Logs.Incoming),
+            }
+        elseif operation == "list" then
+            return Bridge.Callbacks["get-remote-spy-logs"]({
+                direction = data.direction,
+                remoteNameFilter = data.nameFilter,
+                limit = data.limit,
+                maxCallsPerRemote = data.maxCallsPerRemote,
+                summaryOnly = data.summaryOnly,
+            })
+        elseif operation == "clear" then
+            return Bridge.Callbacks["clear-remote-spy-logs"]({})
+        elseif operation == "block" or operation == "unblock" then
+            return Bridge.Callbacks["block-remote"]({
+                remoteName = data.remoteName,
+                direction = data.direction,
+                shouldBlock = operation == "block",
+            })
+        elseif operation == "ignore" or operation == "unignore" then
+            return Bridge.Callbacks["ignore-remote"]({
+                remoteName = data.remoteName,
+                direction = data.direction,
+                shouldIgnore = operation == "ignore",
+            })
+        end
+
+        error("Invalid remote-spy operation: " .. tostring(operation))
     end)
 
     Bridge:BindToType("type-text-box", function(data)

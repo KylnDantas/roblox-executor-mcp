@@ -14,11 +14,7 @@ import registerSemanticSearchScripts from "./impl/inspection/semantic-search-scr
 import registerGetGameInfo from "./impl/inspection/get-game-info.js";
 import registerGetDescendantsTree from "./impl/inspection/get-descendants-tree.js";
 
-import registerEnsureRemoteSpy from "./impl/remote-spy/ensure-remote-spy.js";
-import registerGetRemoteSpyLogs from "./impl/remote-spy/get-remote-spy-logs.js";
-import registerClearRemoteSpyLogs from "./impl/remote-spy/clear-remote-spy-logs.js";
-import registerBlockRemote from "./impl/remote-spy/block-remote.js";
-import registerIgnoreRemote from "./impl/remote-spy/ignore-remote.js";
+import registerRemoteSpy from "./impl/remote-spy/remote-spy.js";
 
 import registerTypeTextBox from "./impl/gui/type-text-box.js";
 import registerClickButton from "./impl/gui/click-button.js";
@@ -43,11 +39,7 @@ export function registerAllTools(server: McpServer): void {
   registerGetGameInfo(server);
   registerGetDescendantsTree(server);
 
-  registerEnsureRemoteSpy(server);
-  registerGetRemoteSpyLogs(server);
-  registerClearRemoteSpyLogs(server);
-  registerBlockRemote(server);
-  registerIgnoreRemote(server);
+  registerRemoteSpy(server);
 
   registerTypeTextBox(server);
   registerClickButton(server);
