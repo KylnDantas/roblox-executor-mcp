@@ -57,7 +57,7 @@ local getscriptbytecode = getscriptbytecode or function(_) error("Unable to get 
 local GetScriptHash = type(getscripthash) == "function" and getscripthash or nil
 local BuiltInDecompile = type(decompile) == "function" and decompile or nil
 
-local LuaEncode = loadstring(game:HttpGet("https://raw.githubusercontent.com/chadhyatt/LuaEncode/refs/heads/master/src/LuaEncode.lua"))()
+local LuaEncode = loadstring(game:HttpGet("https://raw.githubusercontent.com/KylnDantas/roblox-executor-mcp/refs/heads/main/LuaEncode.lua"))()
 
 --// Bounded serialization: cap depth / entries / string length and render
 --// Instances as their path so structured tool responses can't flood the
@@ -1636,7 +1636,7 @@ while true do
 
         -- Load Cobalt
         local success, err = pcall(function()
-            loadstring(game:HttpGet("https://github.com/notpoiu/cobalt/releases/latest/download/Cobalt.luau"))()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/KylnDantas/roblox-executor-mcp/refs/heads/main/Cobalt.luau"))()
         end)
 
         if not success then
